@@ -1,4 +1,4 @@
-# Refactor Plan — DeFindex Lost Funds Distribution
+# Refactor Plan — DeFindex Distribution
 
 ## Overview
 
@@ -55,15 +55,15 @@ This project implements a complete flow to calculate and user funds:
 
 ### Input: Lost Funds CSV
 ```
-vault_id,user_address,df_tokens,pps_before,pps_after,underlying_before,underlying_after,underlying_delta,Amount
-CBNK...,GDVL...,1865162100605,1.105133558,0.9504424463,2061253228838,1772729229657,-288523999181,"-$28,852.40"
+asset,vault,user,amount
+CBNK...,CCW,GDVL...,12345670
 ```
 
 ### Output: Analysis JSON (`analysis_<ts>.json`)
 ```json
 {
   "timestamp": "2026-02-23T...",
-  "source_csv": "DeFindex Lost Funds - per_user_per_vault.csv",
+  "source_csv": "DeFindex - per_user_per_vault.csv",
   "total_users": 920,
   "total_vaults": 12,
   "vaults": {
@@ -71,7 +71,7 @@ CBNK...,GDVL...,1865162100605,1.105133558,0.9504424463,2061253228838,17727292296
       "total_loss": 288523999181,
       "user_count": 319,
       "users": [
-        { "address": "GDVL...", "underlying_delta": 288523999181 }
+        { "address": "GDVL...", "underlying_amount_deposited": 288523999181 }
       ]
     }
   }
