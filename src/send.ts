@@ -1,12 +1,12 @@
 import "dotenv/config";
 import {
   Keypair,
-  Networks,
   TransactionBuilder,
   Operation,
   Asset,
   Horizon,
 } from "@stellar/stellar-sdk";
+import { getNetworkPassphrase } from "./utils";
 
 const HORIZON_URL = process.env.HORIZON_RPC as string;
 
@@ -49,7 +49,7 @@ async function sendXLM(
 
   const transaction = new TransactionBuilder(account, {
     fee: "2000",
-    networkPassphrase: Networks.PUBLIC,
+    networkPassphrase: getNetworkPassphrase(),
   })
     .addOperation(
       Operation.payment({

@@ -1,13 +1,6 @@
-# dfTokens Transfer Campaigns
+# DeFindex Distributor
 
-CLI tool to batch transfer dfTokens from a Soroswap USDC Vault to multiple recipients.
-
-## Features
-
-- Reads recipients and USDC amounts from a CSV file
-- Automatically converts USDC amounts to dfToken amounts using vault's exchange rate
-- Batches transfers (10 per transaction) using the Stellar Router contract
-- Shows dry-run summary before executing transfers
+CLI toolkit for managing DeFindex vault distributions. Includes a complete pipeline: **analyze losses, deposit into vaults, and distribute dfTokens** to users. Supports both **mainnet** and **testnet**.
 
 ## Setup
 
@@ -16,92 +9,158 @@ CLI tool to batch transfer dfTokens from a Soroswap USDC Vault to multiple recip
    pnpm install
    ```
 
-2. Configure environment variables in `.env`:
-   ```
-   SOROBAN_RPC=https://soroban.stellar.org
-   HORIZON_RPC=https://horizon.stellar.org
-   STELLAR_SECRET_KEY=S...  # Account holding dfTokens (for transfer/send)
-   MERGE_SECRET=S...        # Secret key of account to merge (for merge:secret)
-   MNEMONIC="word1 word2..."  # 12/24 word mnemonic (for merge:mnemonic)
+2. Copy and configure environment variables:
+   ```bash
+   cp .env.example .env
    ```
 
-## Scripts
+   Key variables:
+   ```
+   STELLAR_NETWORK=testnet          # "testnet" or "public" (default: public)
+   SOROBAN_RPC=https://soroban-testnet.stellar.org
+   HORIZON_RPC=https://horizon-testnet.stellar.org
+   STELLAR_SECRET_KEY=S...          # Account holding funds for deposits/transfers
+   ROUTER_CONTRACT=CAG5...          # Optional, defaults to mainnet router
+   ```
 
-### Transfer dfTokens (`pnpm transfer`)
+## Testnet Demo Flow
 
-Batch transfer dfTokens from the Soroswap USDC Vault to multiple recipients.
+End-to-end demo that deploys vaults, creates test users, and runs the full distribution pipeline on testnet.
 
-```bash
-pnpm transfer <accounts.csv>
-```
-
-**Required env vars:** `STELLAR_SECRET_KEY`, `SOROBAN_RPC`, `HORIZON_RPC`
-
-#### CSV Format
-
-```csv
-address,amount
-GABC...,100
-GDEF...,50
-```
-
-- `address`: Stellar public key (G...) or contract address (C...)
-- `amount`: USDC amount (human-readable, e.g., `100` for 100 USDC)
-
----
-
-### Send XLM (`pnpm send`)
-
-Send XLM from your account to a destination address.
+### 1. Deploy vaults and generate test data
 
 ```bash
-pnpm send <amount> <destination>
+STELLAR_NETWORK=testnet pnpm demo
 ```
 
-**Example:**
-```bash
-pnpm send 10 GABC...
-```
+- Deploys 3 vaults (alternating XTAR/USDC) via the DeFindex factory
+- Creates 10 users per vault, funded via friendbot
+- Mints USDC/XTAR for the manager and users via [Soroswap faucet](https://api.soroswap.finance/api/faucet)
+- Generates a CSV with simulated loss data
 
-**Required env vars:** `STELLAR_SECRET_KEY`, `HORIZON_RPC`
+**Output:** `output/demo/demo_testnet_<timestamp>.csv`
 
----
-
-### Merge Account from Secret (`pnpm merge:secret`)
-
-Merge an account into a destination using a secret key. This closes the source account and transfers all XLM to the destination.
+### 2. Analyze the demo CSV
 
 ```bash
-pnpm merge:secret
+pnpm analyze output/demo/demo_testnet_<timestamp>.csv
 ```
 
-**Required env vars:** `MERGE_SECRET`, `HORIZON_RPC`
+- Auto-detects the CSV format (demo or lost funds)
+- Groups records by vault and computes total loss per vault
 
----
+**Output:** `output/analysis/analysis_<timestamp>.json`
 
-### Merge Account from Mnemonic (`pnpm merge:mnemonic`)
-
-Merge an account derived from a mnemonic phrase (BIP39) into a destination. Uses the first derived account (index 0).
+### 3. Mint tokens to cover deposits
 
 ```bash
-pnpm merge:mnemonic
+STELLAR_NETWORK=testnet pnpm mint output/demo/demo_testnet_<timestamp>.csv
 ```
 
-**Required env vars:** `MNEMONIC`, `HORIZON_RPC`
+- Accepts either a demo CSV (reads asset column directly) or an analysis JSON
+- Checks current balances per asset, calculates deficit
+- Calls the Soroswap faucet repeatedly (2,500 tokens per call) until covered
 
-## How It Works
+### 4. Deposit into vaults
 
-1. Parses the CSV file
-2. Fetches vault data (total supply, managed funds, locked fees) in 2 optimized RPC calls
-3. Converts each USDC amount to the equivalent dfToken amount
-4. Checks source account balance
-5. Shows transfer summary (dry-run)
-6. Executes batched transfers via the Stellar Router contract
+```bash
+STELLAR_NETWORK=testnet pnpm deposit output/analysis/analysis_<timestamp>.json
+```
 
-## Configuration
+- For each vault: deposits the total loss amount and measures minted dfTokens
+- Calculates proportional per-user dfToken allocation
 
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `SOROSWAP_USDC_VAULT` | `CA2FIP...` | Vault/dfToken contract address |
-| `STELLAR_ROUTER_CONTRACT` | `CDAW42...` | Router for batching invocations |
-| `BATCH_SIZE` | 10 | Transfers per transaction |
+**Outputs:**
+- `output/deposits/deposit_log_<ts>.csv`
+- `output/deposits/distribution_<ts>.csv`
+
+### 5. Distribute dfTokens to users
+
+```bash
+STELLAR_NETWORK=testnet pnpm distribute output/deposits/distribution_<ts>.csv
+```
+
+- Batch-transfers dfTokens to all users (10 per transaction)
+- Continues on batch failure, logs results
+
+**Output:** `output/distributions/distributor_<ts>_log.csv`
+
+## Mainnet Distribution Pipeline
+
+For restoring funds to affected DeFindex vault users after the hack.
+
+### Step 1: Analyze
+
+```bash
+pnpm analyze "DeFindex Lost Funds - per_user_per_vault.csv"
+```
+
+**Input CSV columns:** `vault_id`, `user_address`, `df_tokens`, `pps_before`, `pps_after`, `underlying_before`, `underlying_after`, `underlying_amount`, `Amount`
+
+### Step 2: Deposit
+
+```bash
+pnpm deposit output/analysis/analysis_<timestamp>.json
+```
+
+For each vault:
+1. Queries `get_assets()` to identify the underlying token
+2. Verifies the source account has sufficient balance
+3. Executes `deposit()` with the total loss amount
+4. Measures dfTokens minted (balance diff before/after)
+5. Calculates per-user allocation: `dfTokens_user = (user_loss * dfTokens_minted) / total_vault_loss`
+
+### Step 3: Distribute
+
+```bash
+pnpm distribute output/deposits/distribution_<ts>.csv
+```
+
+- Verifies dfToken balances per vault before starting
+- Batches 10 transfers per transaction
+- Continues on batch failure, shows per-vault statistics at the end
+
+## Other Scripts
+
+| Command | Description |
+|---------|-------------|
+| `pnpm transfer <csv>` | Legacy single-vault dfToken transfer (CSV: `address,amount`) |
+| `pnpm send <amount> <dest>` | Send XLM to a destination address |
+| `pnpm merge:secret` | Merge account via `MERGE_SECRET` env var |
+| `pnpm merge:mnemonic` | Merge account via `MNEMONIC` env var (BIP39) |
+
+## Project Structure
+
+```
+src/
+├── utils.ts                # Shared types, network config, Stellar/router utilities
+├── analyze.ts              # CSV analysis (supports demo + lost funds formats)
+├── deposit.ts              # Vault deposits + distribution calculation
+├── distribute.ts           # Batch dfToken transfers
+├── demo.ts                 # Testnet demo: deploy vaults, create users, generate CSV
+├── mint.ts                 # Testnet token minter via Soroswap faucet
+├── index.ts                # Legacy single-vault transfer
+├── send.ts                 # XLM send utility
+├── mergeAccountMnemonic.ts
+└── mergeAccountSecret.ts
+
+output/                     # All script outputs (gitignored)
+├── demo/                   # demo_testnet_*.csv
+├── analysis/               # analysis_*.json
+├── deposits/               # deposit_log_*.csv, distribution_*.csv
+└── distributions/          # distributor_*_log.csv
+```
+
+## All Scripts
+
+| Command | Description |
+|---------|-------------|
+| `pnpm demo` | Deploy testnet vaults, create users, generate demo CSV |
+| `pnpm mint <csv\|json>` | Mint testnet tokens via Soroswap faucet |
+| `pnpm analyze <csv>` | Analyze lost funds / demo CSV |
+| `pnpm deposit <json>` | Deposit into vaults, generate distribution CSV |
+| `pnpm distribute <csv>` | Batch-transfer dfTokens to users |
+| `pnpm transfer <csv>` | Legacy single-vault transfer |
+| `pnpm send <amount> <dest>` | Send XLM |
+| `pnpm merge:secret` | Merge account via secret key |
+| `pnpm merge:mnemonic` | Merge account via mnemonic |

@@ -1,39 +1,27 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { rpc, Address, xdr, Keypair, Contract, Networks, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
+import { Address, xdr, Keypair } from "@stellar/stellar-sdk";
 import { config } from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
+import {
+  BATCH_SIZE,
+  rpcServer,
+  Invocation,
+  StrategyReport,
+  TransferRecord,
+  simulateContractCall,
+  simulateMultipleInvocations,
+  buildRouterTransaction,
+  sendTransaction,
+  batchArray,
+  createVaultInvocation,
+} from "./utils";
 
 config();
 
 // Constants
 // const DEFINDEX_VAULT = "CC767WIU5QGJMXYHDDYJAJEF2YWPHOXOZDWD3UUAZVS4KQPRXCKPT2YZ"; // SeevcashVault
 const DEFINDEX_VAULT = "CA2FIPJ7U6BG3N7EOZFI74XPJZOEOD4TYWXFVCIO5VDCHTVAGS6F4UKK"; // SoroswapVault
-const STELLAR_ROUTER_CONTRACT = "CDAW42JDSDEI2DXEPP4E7OAYNCRUA4LGCZHXCJ4BV5WVI4O4P77FO4UV";
-const BATCH_SIZE = 10;
-
-// Servers
-const rpcServer = new rpc.Server(process.env.SOROBAN_RPC as string);
-
-// Types
-interface TransferRecord {
-  address: string;
-  amount: number;
-}
-
-interface Invocation {
-  contract: Address;
-  method: string;
-  args: xdr.ScVal[];
-  can_fail: boolean;
-}
-
-interface StrategyReport {
-  locked_fees?: string | number;
-  locked_fee?: string | number;
-  lockedFee?: string | number;
-  [key: string]: unknown;
-}
 
 // Locked Fees Calculation
 function sumLockedFeesFromReport(report: StrategyReport[]): bigint {
@@ -109,99 +97,6 @@ function parseCSV(filePath: string): TransferRecord[] {
   return records;
 }
 
-// Simulate Multiple Invocations via Router (batched)
-async function simulateMultipleInvocations(
-  invocations: Invocation[],
-  sourcePublicKey: string
-): Promise<unknown[]> {
-  const account = await rpcServer.getAccount(sourcePublicKey);
-  const routerContract = new Contract(STELLAR_ROUTER_CONTRACT);
-
-  const invocationsScVal = xdr.ScVal.scvVec(
-    invocations.map((invocation) =>
-      xdr.ScVal.scvVec([
-        new Address(invocation.contract.toString()).toScVal(),
-        xdr.ScVal.scvSymbol(invocation.method),
-        xdr.ScVal.scvVec(invocation.args),
-        xdr.ScVal.scvBool(invocation.can_fail),
-      ])
-    )
-  );
-
-  const operation = routerContract.call(
-    'exec',
-    new Address(sourcePublicKey).toScVal(),
-    invocationsScVal
-  );
-
-  const txBuilder = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: Networks.PUBLIC,
-  });
-
-  txBuilder.addOperation(operation);
-  txBuilder.setTimeout(30);
-  const tx = txBuilder.build();
-
-  const simulation = await rpcServer.simulateTransaction(tx);
-
-  if (rpc.Api.isSimulationError(simulation)) {
-    throw new Error(`Batch simulation error: ${simulation.error}`);
-  }
-
-  const successSimulation = simulation as rpc.Api.SimulateTransactionSuccessResponse;
-  if (!successSimulation.result) {
-    throw new Error('Batch simulation returned no result');
-  }
-
-  return StellarSdk.scValToNative(successSimulation.result.retval);
-}
-
-// Single Contract Simulation
-async function simulateContractCall(
-  contractId: string,
-  method: string,
-  params: xdr.ScVal[],
-  sourcePublicKey: string
-): Promise<unknown> {
-  const contract = new Contract(contractId);
-  const operation = contract.call(method, ...params);
-
-  const account = await rpcServer.getAccount(sourcePublicKey);
-
-  const txBuilder = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: Networks.PUBLIC,
-  });
-
-  txBuilder.addOperation(operation);
-  txBuilder.setTimeout(30);
-  const tx = txBuilder.build();
-
-  const simulation = await rpcServer.simulateTransaction(tx);
-
-  if (rpc.Api.isSimulationError(simulation)) {
-    throw new Error(`Simulation error for ${contractId}.${method}: ${simulation.error}`);
-  }
-
-  const successSimulation = simulation as rpc.Api.SimulateTransactionSuccessResponse;
-  if (!successSimulation.result) {
-    throw new Error(`Simulation for ${contractId}.${method} returned no result`);
-  }
-
-  return StellarSdk.scValToNative(successSimulation.result.retval);
-}
-
-// Helper to create vault invocation
-function createVaultInvocation(method: string, args: xdr.ScVal[] = []): Invocation {
-  return {
-    contract: new Address(DEFINDEX_VAULT),
-    method,
-    args,
-    can_fail: false,
-  };
-}
-
 // Get Vault Data for USDC to dfToken Conversion (optimized: 2 RPC calls instead of 5)
 async function getVaultData(sourcePublicKey: string): Promise<{
   totalSupply: bigint;
@@ -221,10 +116,10 @@ async function getVaultData(sourcePublicKey: string): Promise<{
   // Call 2: Batch all remaining calls via router
   // Order: report -> lock_fees -> total_supply -> fetch_total_managed_funds
   const batchedInvocations: Invocation[] = [
-    createVaultInvocation('report'),
-    createVaultInvocation('lock_fees', [xdr.ScVal.scvVoid()]),
-    createVaultInvocation('total_supply'),
-    createVaultInvocation('fetch_total_managed_funds'),
+    createVaultInvocation(DEFINDEX_VAULT, 'report'),
+    createVaultInvocation(DEFINDEX_VAULT, 'lock_fees', [xdr.ScVal.scvVoid()]),
+    createVaultInvocation(DEFINDEX_VAULT, 'total_supply'),
+    createVaultInvocation(DEFINDEX_VAULT, 'fetch_total_managed_funds'),
   ];
 
   const results = await simulateMultipleInvocations(batchedInvocations, manager);
@@ -289,100 +184,6 @@ function createTransferInvocation(
   };
 }
 
-// Build Router Transaction
-async function buildRouterTransaction(
-  sourceKeypair: Keypair,
-  invocations: Invocation[]
-): Promise<StellarSdk.Transaction> {
-  const sourcePublicKey = sourceKeypair.publicKey();
-  const account = await rpcServer.getAccount(sourcePublicKey);
-
-  const routerContract = new Contract(STELLAR_ROUTER_CONTRACT);
-
-  const invocationsScVal = xdr.ScVal.scvVec(
-    invocations.map((invocation) =>
-      xdr.ScVal.scvVec([
-        new Address(invocation.contract.toString()).toScVal(),
-        xdr.ScVal.scvSymbol(invocation.method),
-        xdr.ScVal.scvVec(invocation.args),
-        xdr.ScVal.scvBool(invocation.can_fail),
-      ])
-    )
-  );
-
-  const operation = routerContract.call(
-    'exec',
-    new Address(sourcePublicKey).toScVal(),
-    invocationsScVal
-  );
-
-  const txBuilder = new TransactionBuilder(account, {
-    fee: "2000",
-    networkPassphrase: Networks.PUBLIC,
-  });
-
-  txBuilder.addOperation(operation);
-  txBuilder.setTimeout(300);
-
-  const tx = txBuilder.build();
-
-  // Simulate to get proper resources
-  const simulation = await rpcServer.simulateTransaction(tx);
-
-  if (rpc.Api.isSimulationError(simulation)) {
-    throw new Error(`Transaction simulation failed: ${simulation.error}`);
-  }
-
-  const preparedTx = rpc.assembleTransaction(tx, simulation).build();
-  preparedTx.sign(sourceKeypair);
-
-  return preparedTx;
-}
-
-// Send Transaction and Wait for Confirmation
-async function sendTransaction(
-  transaction: StellarSdk.Transaction
-): Promise<string> {
-  const response = await rpcServer.sendTransaction(transaction);
-
-  if (response.status !== "PENDING") {
-    const xdrResult = response.errorResult?.toXDR('base64');
-    if (xdrResult) {
-      const error = xdr.TransactionResult.fromXDR(xdrResult, 'base64').result().switch().name;
-      throw new Error(`Transaction failed: ${error}`);
-    }
-    throw new Error(`Transaction failed with status: ${response.status}`);
-  }
-
-  console.log(`  Transaction submitted: ${response.hash}`);
-  console.log('  Waiting for confirmation...');
-
-  const txHash = response.hash;
-  let status = response.status;
-
-  while (status === "PENDING") {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const txResponse = await rpcServer.getTransaction(txHash);
-
-    if (txResponse.status === "SUCCESS") {
-      return txHash;
-    } else if (txResponse.status === "FAILED") {
-      throw new Error(`Transaction failed: ${txHash}`);
-    }
-  }
-
-  return txHash;
-}
-
-// Batch Array Helper
-function batchArray<T>(array: T[], batchSize: number): T[][] {
-  const batches: T[][] = [];
-  for (let i = 0; i < array.length; i += batchSize) {
-    batches.push(array.slice(i, i + batchSize));
-  }
-  return batches;
-}
-
 // Main Function
 async function main() {
   const args = process.argv.slice(2);
@@ -417,7 +218,6 @@ async function main() {
   console.log('='.repeat(60));
   console.log(`Source Account: ${sourcePublicKey}`);
   console.log(`Vault: ${DEFINDEX_VAULT}`);
-  console.log(`Router: ${STELLAR_ROUTER_CONTRACT}`);
   console.log(`Network: Mainnet`);
   console.log('');
 

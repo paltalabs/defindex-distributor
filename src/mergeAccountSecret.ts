@@ -1,11 +1,11 @@
 import {
     Horizon,
     Keypair,
-    Networks,
     Operation,
     TransactionBuilder,
   } from "@stellar/stellar-sdk";
   import { config } from "dotenv";
+  import { getNetworkPassphrase } from "./utils";
   config();
 
   async function main() {
@@ -29,7 +29,7 @@ import {
       // Create the merge transaction
       const transaction = new TransactionBuilder(account, {
         fee: "2000",
-        networkPassphrase: Networks.PUBLIC,
+        networkPassphrase: getNetworkPassphrase(),
       })
         .addOperation(
           Operation.accountMerge({

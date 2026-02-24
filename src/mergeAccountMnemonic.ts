@@ -1,13 +1,13 @@
 import {
     Horizon,
     Keypair,
-    Networks,
     Operation,
     TransactionBuilder,
   } from "@stellar/stellar-sdk";
   import * as bip39 from "bip39";
   import { derivePath } from "ed25519-hd-key";
   import { config } from "dotenv";
+  import { getNetworkPassphrase } from "./utils";
   config();
 
   function keypairFromMnemonic(mnemonic: string, accountIndex = 0): Keypair {
@@ -41,7 +41,7 @@ import {
       // Create the merge transaction
       const transaction = new TransactionBuilder(account, {
         fee: "2000",
-        networkPassphrase: Networks.PUBLIC,
+        networkPassphrase: getNetworkPassphrase(),
       })
         .addOperation(
           Operation.accountMerge({
