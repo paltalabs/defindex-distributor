@@ -330,7 +330,7 @@ async function main() {
     console.log("Distribution results:");
     console.log("-".repeat(120));
     console.log(
-      `${"User".padEnd(58)} ${"Expected".padStart(14)} ${"Before".padStart(14)} ${"After".padStart(14)} ${"Delta".padStart(14)}`
+      `${"User".padEnd(58)} ${"Before".padStart(14)} ${"After".padStart(14)} ${"Delta".padStart(14)} ${"Expected".padStart(14)}`
     );
     console.log("-".repeat(120));
 
@@ -338,7 +338,7 @@ async function main() {
       const deltaMatch = entry.df_tokens_delta === entry.df_tokens_expected;
       const marker = entry.status === "failed" ? " FAILED" : deltaMatch ? "" : " MISMATCH";
       console.log(
-        `${entry.user_address.padEnd(58)} ${entry.df_tokens_expected.padStart(14)} ${entry.df_tokens_before.padStart(14)} ${entry.df_tokens_after.padStart(14)} ${entry.df_tokens_delta.padStart(14)}${marker}`
+        `${entry.user_address.padEnd(58)} ${entry.df_tokens_before.padStart(14)} ${entry.df_tokens_after.padStart(14)} ${entry.df_tokens_delta.padStart(14)} ${entry.df_tokens_expected.padStart(14)}${marker}`
       );
     }
     console.log("-".repeat(120));
@@ -349,10 +349,10 @@ async function main() {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const logPath = getOutputPath("distributions", `distributor_${ts}_log.csv`);
   const logContent = [
-    "vault_id,user_address,df_tokens_expected,df_tokens_before,df_tokens_after,df_tokens_delta,tx_hash,tx_result,batch_number,timestamp,status",
+    "vault_id,user_address,df_tokens_before,df_tokens_after,df_tokens_delta,df_tokens_expected,tx_hash,tx_result,batch_number,timestamp,status",
     ...transferLog.map(
       (e) =>
-        `${e.vault_id},${e.user_address},${e.df_tokens_expected},${e.df_tokens_before},${e.df_tokens_after},${e.df_tokens_delta},${e.tx_hash},"${e.tx_result}",${e.batch_number},${e.timestamp},${e.status}`
+        `${e.vault_id},${e.user_address},${e.df_tokens_before},${e.df_tokens_after},${e.df_tokens_delta},${e.df_tokens_expected},${e.tx_hash},"${e.tx_result}",${e.batch_number},${e.timestamp},${e.status}`
     ),
   ].join("\n");
   fs.writeFileSync(logPath, logContent);

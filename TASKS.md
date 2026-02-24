@@ -37,6 +37,6 @@ events should return more info like underlying assets of minted tokens.
 ## Milestone 5: Distribute script logs
 
 - when executing distribute, we should also check for every user, that the minted dftokens is the same as the returned by contract execution and is the same as the dfToken delta (before and after execution)
-- [ ] Check dfTokens for every user before transaction call
-- [ ] Check dfTokens for every user after transaction call
-- [ ] Display dfTokens before, after, delta, transaction result, transaction hash, distrubution delta
+- [x] Check dfTokens for every user before transaction call
+- [x] Check dfTokens for every user after transaction call
+- [x] Display dfTokens before, after, delta, transaction result, transaction hash, distrubution delta
