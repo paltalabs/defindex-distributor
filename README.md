@@ -2,6 +2,20 @@
 
 CLI toolkit for managing value distributions across DeFindex Vaults . Includes a complete pipeline: **deposit total assets into vaults and distribute dfTokens (DeFindex Vault Tokens)** to users. Supports both **mainnet** and **testnet**.
 
+
+## Deploy defindex-distributor contract
+```
+make test
+make build
+stellar keys generate alice --network testnet --fund
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/defindex_distributor.wasm \
+  --source-account alice \
+  --network testnet \
+  --alias defindex-distributor
+```
+Contract ID will be in `~/.config/stellar/contract-ids/defindex-distributor.json`
+
 ## Setup
 
 1. Install dependencies:
@@ -152,6 +166,25 @@ STELLAR_NETWORK=testnet pnpm distribute output/deposits/distribution_<ts>.csv
 **Output:** `output/distributions/distributor_<ts>_log.csv`
 
 TODO: For all users Check underlying asset before and underlying asset after the distribution
+
+
+for each batch:
+
+Batch 1/3 (10 transfers to vault CBMH54RDM74BOIFJPTZ5MOLCBJSOWTRDR4KCCZDAQSGQZODLOEWPEXLD):
+
+user, df_tokens_now, underlying_asset_now, underlying_asset_to_distribute, df_tokens_to_distribute
+
+...
+Sending transaction
+  Transaction submitted: c892fc3304aafb5d3c94aa445174c0186ed94f1277f66e98fc7824c91b489a92
+  Waiting for confirmation...
+  Batch 1 completed: c892fc3304aafb5d3c94aa445174c0186ed94f1277f66e98fc7824c91b489a92
+
+  Batch 1 result:
+  user, df_tokens_to_distributed, df_tokens_new, underlying_asset_new
+  (This underlying_asset_new should be calculated at this point )
+
+
 
 ## Other Scripts
 

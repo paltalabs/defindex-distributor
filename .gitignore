@@ -3,3 +3,12 @@ node_modules/
 *.backup
 output/
 .env
+
+# Soroban
+## Rust's output directory
+target
+
+## Local settings
+.soroban
+.stellar
+test_snapshots
