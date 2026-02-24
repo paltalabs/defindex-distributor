@@ -5,12 +5,9 @@ import * as fs from "fs";
 import * as path from "path";
 import {
   Invocation,
-  StrategyReport,
   simulateContractCall,
-  simulateMultipleInvocations,
   buildRouterTransaction,
   sendTransaction,
-  createVaultInvocation,
   getOutputPath,
 } from "./utils";
 
@@ -18,7 +15,7 @@ config();
 
 // Types
 interface VaultAnalysis {
-  total_loss: string;
+  total_to_distribute: string;
   user_count: number;
   users: { address: string; underlying_amount: string }[];
 }
@@ -46,64 +43,6 @@ interface DistributionEntry {
   df_tokens_to_receive: string;
 }
 
-// Locked Fees helpers (same as index.ts)
-function sumLockedFeesFromReport(report: StrategyReport[]): bigint {
-  if (!report || !Array.isArray(report)) return 0n;
-  try {
-    return report.reduce((acc: bigint, strategy: StrategyReport) => {
-      const lockedFee = strategy?.locked_fees ?? strategy?.locked_fee ?? strategy?.lockedFee ?? 0;
-      return acc + BigInt(lockedFee);
-    }, 0n);
-  } catch {
-    return 0n;
-  }
-}
-
-function calculateLockedFeesDelta(before: StrategyReport[], after: StrategyReport[]): bigint {
-  const delta = sumLockedFeesFromReport(after) - sumLockedFeesFromReport(before);
-  return delta >= 0n ? delta : 0n;
-}
-
-// Get vault data for dfToken conversion
-async function getVaultData(vaultId: string, sourcePublicKey: string): Promise<{
-  totalSupply: bigint;
-  totalManagedFunds: bigint;
-  lockedFeesDelta: bigint;
-}> {
-  console.log(`  Fetching vault data for ${vaultId}...`);
-
-  const manager = await simulateContractCall(
-    vaultId, 'get_manager', [], sourcePublicKey
-  ) as string;
-
-  const batchedInvocations: Invocation[] = [
-    createVaultInvocation(vaultId, 'report'),
-    createVaultInvocation(vaultId, 'lock_fees', [xdr.ScVal.scvVoid()]),
-    createVaultInvocation(vaultId, 'total_supply'),
-    createVaultInvocation(vaultId, 'fetch_total_managed_funds'),
-  ];
-
-  const results = await simulateMultipleInvocations(batchedInvocations, manager);
-
-  const beforeReport = results[0] as StrategyReport[];
-  const afterReport = results[1] as StrategyReport[];
-  const totalSupply = BigInt(results[2] as string | number);
-  const totalManagedFundsData = results[3] as { total_amount?: string | number }[];
-  const fundEntry = totalManagedFundsData[0];
-  const totalManagedFunds = BigInt(
-    typeof fundEntry === 'object' && fundEntry?.total_amount !== undefined
-      ? fundEntry.total_amount
-      : (fundEntry as unknown as string | number)
-  );
-  const lockedFeesDelta = calculateLockedFeesDelta(beforeReport, afterReport);
-
-  console.log(`    Total Supply: ${totalSupply}`);
-  console.log(`    Total Managed Funds: ${totalManagedFunds}`);
-  console.log(`    Locked Fees Delta: ${lockedFeesDelta}`);
-
-  return { totalSupply, totalManagedFunds, lockedFeesDelta };
-}
-
 // Build deposit invocation
 function createDepositInvocation(
   vaultId: string,
@@ -118,7 +57,7 @@ function createDepositInvocation(
       xdr.ScVal.scvVec(amounts.map(a => StellarSdk.nativeToScVal(a, { type: 'i128' }))),
       xdr.ScVal.scvVec(amountsMin.map(a => StellarSdk.nativeToScVal(a, { type: 'i128' }))),
       new Address(from).toScVal(),
-      xdr.ScVal.scvBool(false), // invest flag
+      xdr.ScVal.scvBool(true),
     ],
     can_fail: false,
   };
@@ -163,11 +102,11 @@ async function main() {
 
   for (const vaultId of vaultIds) {
     const vault = analysis.vaults[vaultId];
-    const totalLoss = BigInt(vault.total_loss);
+    const totalToDistribute = BigInt(vault.total_to_distribute);
 
     console.log("-".repeat(60));
     console.log(`Vault: ${vaultId}`);
-    console.log(`  Users: ${vault.user_count} | Total Loss: ${totalLoss} stroops`);
+    console.log(`  Users: ${vault.user_count} | Total to distribute: ${totalToDistribute} stroops`);
 
     // Check source balance of underlying asset
     const assetAddresses = await simulateContractCall(
@@ -192,14 +131,11 @@ async function main() {
     const assetBalance = BigInt(balanceResult as string | number);
     console.log(`  Source balance of underlying: ${assetBalance}`);
 
-    if (assetBalance < totalLoss) {
-      console.error(`  WARNING: Insufficient balance. Have ${assetBalance}, need ${totalLoss}`);
+    if (assetBalance < totalToDistribute) {
+      console.error(`  WARNING: Insufficient balance. Have ${assetBalance}, need ${totalToDistribute}`);
       console.error(`  Skipping vault ${vaultId}`);
       continue;
     }
-
-    // Get vault data before deposit (for later comparison)
-    const preVaultData = await getVaultData(vaultId, sourcePublicKey);
 
     // Get dfToken balance before deposit
     const preBalance = BigInt(
@@ -213,12 +149,12 @@ async function main() {
 
     // Build deposit amounts (one per asset in the vault)
     const depositAmounts = assetAddresses.map((_, idx) =>
-      idx === 0 ? totalLoss : 0n
+      idx === 0 ? totalToDistribute : 0n
     );
-    const depositAmountsMin = depositAmounts.map(() => 0n); // no slippage protection for now
+    const depositAmountsMin = depositAmounts.map((amount) => amount - 1n); // Accept 1 stroop slippage per asset 
 
     // Build and send deposit transaction
-    console.log(`  Depositing ${totalLoss} into vault...`);
+    console.log(`  Depositing ${totalToDistribute} into vault...`);
 
     const depositInvocation = createDepositInvocation(
       vaultId, depositAmounts, depositAmountsMin, sourcePublicKey
@@ -246,7 +182,7 @@ async function main() {
       const now = new Date().toISOString();
       depositLog.push({
         vault_id: vaultId,
-        amount_deposited: totalLoss.toString(),
+        amount_deposited: totalToDistribute.toString(),
         df_tokens_minted: dfTokensMinted.toString(),
         tx_hash: txHash,
         timestamp: now,
@@ -254,10 +190,10 @@ async function main() {
 
       // Calculate proportional distribution
       for (const user of vault.users) {
-        const userDelta = BigInt(user.underlying_amount);
-        // dfTokens_user = (userDelta / totalLoss) * dfTokensMinted
-        // Using integer math: (userDelta * dfTokensMinted) / totalLoss
-        const userDfTokens = (userDelta * dfTokensMinted) / totalLoss;
+        const userPart = BigInt(user.underlying_amount);
+        // dfTokens_user = (userPart / totalToDistribute) * dfTokensMinted
+        // Using integer math: (userPart * dfTokensMinted) / totalToDistribute
+        const userDfTokens = (userPart * dfTokensMinted) / totalToDistribute;
 
         distribution.push({
           vault_id: vaultId,
@@ -269,8 +205,8 @@ async function main() {
 
       // Verify distribution sum matches minted
       const distributionSum = vault.users.reduce((sum, user) => {
-        const userDelta = BigInt(user.underlying_amount);
-        return sum + (userDelta * dfTokensMinted) / totalLoss;
+        const userPart = BigInt(user.underlying_amount);
+        return sum + (userPart * dfTokensMinted) / totalToDistribute;
       }, 0n);
 
       const remainder = dfTokensMinted - distributionSum;
