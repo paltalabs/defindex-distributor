@@ -86,4 +86,7 @@ impl Distributor {
     }
 }
 
+#[cfg(test)]
+mod testutils;
+
 mod test;

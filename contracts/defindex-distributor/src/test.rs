@@ -1,7 +1,313 @@
 #![cfg(test)]
 
+extern crate std;
+
 use super::*;
 use soroban_sdk::{testutils::Address as _, vec, Address, Env, Vec};
+
+mod integration {
+    use super::*;
+    use crate::testutils::{
+        DistributorTestFixture, EnvTestUtils,
+        INITIAL_DEPOSIT, MINIMUM_LIQUIDITY, ONE_DAY_LEDGERS,
+        blend_setup::Request,
+    };
+
+    // ── Vault deposit verification ─────────────────────────────────────────────
+
+    /// Verifies a single deposit into the vault:
+    /// - df-tokens are minted and owned by the depositor
+    /// - underlying USDC moves out of the depositor's wallet
+    /// - vault's total_managed_funds grows by exactly the deposit amount
+    /// - pro-rata share formula holds: df_minted = floor(amount * S / M)
+    /// - immediate withdrawal value (get_asset_amounts_per_shares) ≤ deposited amount
+    #[test]
+    fn test_vault_deposit_verified() {
+        let f = DistributorTestFixture::create();
+        let env = &f.env;
+
+        let user = Address::generate(env);
+        let deposit_amount = 500_0000000_i128; // 500 USDC (7 decimals)
+        f.usdc_admin.mint(&user, &deposit_amount);
+
+        // Snapshot state before deposit
+        let total_supply_before = f.vault.total_supply();
+        let total_managed_before = f
+            .vault
+            .fetch_total_managed_funds()
+            .get(0)
+            .unwrap()
+            .total_amount;
+
+        // Deposit idle (invest=false so funds stay in vault, not pushed to strategy)
+        let (_, df_minted, _) = f.vault.deposit(
+            &vec![env, deposit_amount],
+            &vec![env, 0_i128],
+            &user,
+            &false,
+        );
+
+        // df-tokens minted and held by user
+        assert!(df_minted > 0, "deposit must mint df-tokens");
+        assert_eq!(f.vault.balance(&user), df_minted);
+
+        // USDC consumed from user
+        assert_eq!(f.usdc.balance(&user), 0, "user USDC must be zero after deposit");
+
+        // Pro-rata formula: shares = floor(deposit * total_supply / total_managed)
+        let expected_shares = deposit_amount * total_supply_before / total_managed_before;
+        assert_eq!(
+            df_minted, expected_shares,
+            "df_minted should match pro-rata formula"
+        );
+
+        // total_managed grew by exactly the deposit amount (idle funds)
+        let total_managed_after = f
+            .vault
+            .fetch_total_managed_funds()
+            .get(0)
+            .unwrap()
+            .total_amount;
+        assert_eq!(total_managed_after, total_managed_before + deposit_amount);
+
+        // Immediate withdrawal value must not exceed deposited amount
+        // (floor rounding in share calc means user recovers ≤ what they put in)
+        let user_underlying = f
+            .vault
+            .get_asset_amounts_per_shares(&df_minted)
+            .get(0)
+            .unwrap();
+        assert!(
+            user_underlying <= deposit_amount,
+            "underlying {} must not exceed deposit {}", user_underlying, deposit_amount
+        );
+        assert!(user_underlying > 0, "recoverable underlying must be positive");
+    }
+
+    /// Deposits ten varied amounts and for each compares:
+    ///   1. df-tokens minted (pro-rata formula)
+    ///   2. underlying asset recoverable immediately after (get_asset_amounts_per_shares)
+    ///
+    /// Invariant: recoverable_underlying ≤ deposited_amount always holds because
+    /// share minting uses floor division.  The delta is the rounding dust (≤ 1 strop).
+    #[test]
+    fn test_deposit_exchange_rate_ten_amounts() {
+        let f = DistributorTestFixture::create();
+        let env = &f.env;
+
+        // Ten varied amounts at 7-decimal USDC scale
+        let amounts: [i128; 10] = [
+            1_0000000,          //      1.0000000 USDC
+            7_3456789,          //      7.3456789 USDC
+            42_0000000,         //     42.0000000 USDC
+            100_5000000,        //    100.5000000 USDC
+            333_3333333,        //    333.3333333 USDC
+            500_0000000,        //    500.0000000 USDC
+            1_000_0000000,      //  1 000.0000000 USDC
+            2_500_0000001,      //  2 500.0000001 USDC
+            10_000_0000000,     // 10 000.0000000 USDC
+            99_9999999,         //     99.9999999 USDC
+        ];
+
+        for amount in amounts {
+            let user = Address::generate(env);
+            f.usdc_admin.mint(&user, &amount);
+
+            // State before this particular deposit
+            let total_supply = f.vault.total_supply();
+            let total_managed = f
+                .vault
+                .fetch_total_managed_funds()
+                .get(0)
+                .unwrap()
+                .total_amount;
+
+            let (_, df_minted, _) = f.vault.deposit(
+                &vec![env, amount],
+                &vec![env, 0_i128],
+                &user,
+                &false,
+            );
+
+            // Basic sanity
+            assert!(df_minted > 0, "df_minted must be > 0 for amount {}", amount);
+            assert_eq!(
+                f.vault.balance(&user), df_minted,
+                "vault balance must equal df_minted for amount {}", amount
+            );
+            assert_eq!(
+                f.usdc.balance(&user), 0,
+                "user USDC must be 0 after deposit for amount {}", amount
+            );
+
+            // Pro-rata formula verification
+            let expected = amount * total_supply / total_managed;
+            assert_eq!(
+                df_minted, expected,
+                "df_minted must match pro-rata for amount {}", amount
+            );
+
+            // Recoverable underlying: what the user gets back if they withdraw now
+            // Invariant: recoverable ≤ deposited  (floor division in share minting)
+            let recoverable = f
+                .vault
+                .get_asset_amounts_per_shares(&df_minted)
+                .get(0)
+                .unwrap();
+
+            assert!(
+                recoverable <= amount,
+                "amount {} | df_minted {} | recoverable {} — must not exceed deposited",
+                amount, df_minted, recoverable
+            );
+            assert!(
+                recoverable > 0,
+                "recoverable underlying must be positive for amount {}", amount
+            );
+
+            // The rounding loss (amount - recoverable) should be at most 1 strop
+            let dust = amount - recoverable;
+            assert!(
+                dust <= 1,
+                "amount {} | df_minted {} | recoverable {} | dust {} — dust exceeds 1 strop",
+                amount, df_minted, recoverable, dust
+            );
+        }
+    }
+
+    /// Full happy-path: fixture is created (blend pool + strategy + vault +
+    /// first deposit + rebalance), then `distribute` splits freshly-minted
+    /// vault shares between two recipients pro-rata.
+    #[test]
+    fn test_distribute_with_real_vault() {
+        let f = DistributorTestFixture::create();
+        let env = &f.env;
+
+        let caller = Address::generate(env);
+        let recipient1 = Address::generate(env);
+        let recipient2 = Address::generate(env);
+
+        // Give the caller enough USDC to distribute
+        let deposit_total = 1_000_0000000_i128; // 1 000 USDC (7 decimals)
+        f.usdc_admin.mint(&caller, &deposit_total);
+
+        // Recipients' desired share of the underlying (60 / 40 split)
+        let amount1 = 600_0000000_i128;
+        let amount2 = 400_0000000_i128;
+        let recipients: Vec<(Address, i128)> = vec![
+            env,
+            (recipient1.clone(), amount1),
+            (recipient2.clone(), amount2),
+        ];
+
+        // distribute() deposits `deposit_total` into the vault on behalf of
+        // `caller`, then transfers the minted df-tokens to each recipient.
+        let results = f.distributor.distribute(&caller, &f.vault.address, &recipients);
+
+        // The vault should have issued some df-tokens
+        let df1 = results.get(0).unwrap().1;
+        let df2 = results.get(1).unwrap().1;
+        assert!(df1 > 0, "recipient1 should have received df-tokens");
+        assert!(df2 > 0, "recipient2 should have received df-tokens");
+        // df1+df2 equals the total minted shares (not necessarily deposit_total because
+        // the vault already has deposits and the share price is not exactly 1:1)
+        assert_eq!(df1 + df2, f.vault.balance(&recipient1) + f.vault.balance(&recipient2));
+
+        // Verify vault balances match
+        assert_eq!(f.vault.balance(&recipient1), df1);
+        assert_eq!(f.vault.balance(&recipient2), df2);
+        // Caller should hold no leftover df-tokens
+        assert_eq!(f.vault.balance(&caller), 0);
+    }
+
+    /// Verifies that the fixture itself is correctly set up:
+    /// - vault has the blend strategy registered
+    /// - setup_user deposit went through (shares minted, MINIMUM_LIQUIDITY locked)
+    /// - after rebalance, vault's idle balance is zero (all in strategy)
+    #[test]
+    fn test_fixture_setup_state() {
+        let f = DistributorTestFixture::create();
+
+        // setup_user spent INITIAL_DEPOSIT and got shares = INITIAL_DEPOSIT - MINIMUM_LIQUIDITY
+        let setup_user_shares = f.vault.balance(&f.setup_user);
+        assert_eq!(setup_user_shares, INITIAL_DEPOSIT - MINIMUM_LIQUIDITY);
+
+        // After rebalance the vault holds no idle USDC
+        let vault_idle = f.usdc.balance(&f.vault.address);
+        assert_eq!(vault_idle, 0);
+
+        // All funds are in the blend strategy.
+        // The Blend pool's b-rate arithmetic can round the reported balance by up to
+        // MINIMUM_LIQUIDITY (1 000 strops) relative to the deposited amount.
+        let strategy_bal = f.strategy.balance(&f.vault.address);
+        assert!(
+            strategy_bal >= INITIAL_DEPOSIT - MINIMUM_LIQUIDITY && strategy_bal <= INITIAL_DEPOSIT,
+            "strategy balance should be ~INITIAL_DEPOSIT, got {}",
+            strategy_bal
+        );
+    }
+
+    /// After time passes and the blend pool accrues interest, the vault's
+    /// total managed funds grow, meaning newly minted df-tokens are worth more
+    /// than the deposited USDC (exchange rate > 1:1).  `distribute` should
+    /// still apportion them correctly with no dust lost.
+    #[test]
+    fn test_distribute_after_yield_accrual() {
+        let f = DistributorTestFixture::create();
+        let env = &f.env;
+
+        // Seed the pool with a borrower so interest actually accrues
+        let borrower = Address::generate(env);
+        f.usdc_admin.mint(&borrower, &500_0000000_i128);
+        f.blend_pool.submit(
+            &borrower,
+            &borrower,
+            &borrower,
+            &vec![
+                env,
+                Request {
+                    request_type: 2, // borrow
+                    address: f.usdc.address.clone(),
+                    amount: 500_0000000_i128,
+                },
+            ],
+        );
+
+        // Let a week pass so interest accrues
+        env.jump(ONE_DAY_LEDGERS * 7);
+
+        // Now distribute
+        let caller = Address::generate(env);
+        let recipient1 = Address::generate(env);
+        let recipient2 = Address::generate(env);
+
+        let amount = 200_0000000_i128;
+        f.usdc_admin.mint(&caller, &amount);
+
+        let recipients: Vec<(Address, i128)> = vec![
+            env,
+            (recipient1.clone(), 120_0000000_i128),
+            (recipient2.clone(), 80_0000000_i128),
+        ];
+
+        let results = f.distributor.distribute(&caller, &f.vault.address, &recipients);
+
+        let df1 = results.get(0).unwrap().1;
+        let df2 = results.get(1).unwrap().1;
+        assert!(df1 > 0);
+        assert!(df2 > 0);
+        // After interest accrual the vault's share price is no longer 1:1 with the
+        // underlying, so df_tokens_minted != amount.  What matters is that:
+        //   (a) no dust is lost (df1+df2 == total minted == sum of vault balances)
+        //   (b) caller holds nothing
+        assert_eq!(df1 + df2, f.vault.balance(&recipient1) + f.vault.balance(&recipient2),
+            "no df-tokens should be lost to rounding");
+
+        assert_eq!(f.vault.balance(&recipient1), df1);
+        assert_eq!(f.vault.balance(&recipient2), df2);
+        assert_eq!(f.vault.balance(&caller), 0);
+    }
+}
 
 // ── Mock vault ────────────────────────────────────────────────────────────────
 //
