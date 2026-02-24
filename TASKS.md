@@ -1,56 +1,37 @@
 # Tasks — DeFindex Distribution
 
-## Milestone 0: Setup and Documentation
+## Milestone 0: Soroban Setup 
 
-- [x] Create `refactor_plan.md` — 2026-02-23 — done
-- [x] Create `TASKS.md` — 2026-02-23 — done
-- [x] Create backup `src/index.backup.ts` — 2026-02-23 — done
+- [ ] Create hello world smart contract in contracts folder
+- [ ] Create scripts or instructions to deploy
+- [ ] User should be able to see the address of deployed contract
 
-**Verify:** Files exist, project compiles as before
+## Milestone 1: Micro Distributor Contract only Sender
 
-## Milestone 1: Refactor — Extract shared utilities
+The first version of the distributor contract will only send the assets to the users, it wont interact with defindex
 
-- [x] Create `src/utils.ts` with extracted types, functions, constants — 2026-02-23 — done
-- [x] Refactor `src/index.ts` to import from `utils.ts` — 2026-02-23 — done
+- [ ] create micro mvp contract
+    - [ ] contract should receive an array of 
+        [(vault, asset, user, amount), (vault, asset, user, amount), (vault, asset, user, amount)]
+    - [ ] contract should return 
+        [(vault, asset, user, amount, df_tokens_minted), (vault, asset, user, amount, df_tokens_minted)]
+- [ ] add simple test that we receive expected response
+- [ ] deploy
 
-**Verify:** `pnpm transfer <csv>` works identically to before — `npx tsc --noEmit` passes
+## Milestone 2: Script should work with micro mvp contract
 
-## Milestone 2: Analyze script (`src/analyze.ts`)
+- [ ] script should take address of distributor contract
+- [ ] script should take csv and execute batch of transactions
+- [ ] script should work with distributor contract 
 
-- [x] Implement CSV parser for lost funds format (handles quoted fields) — 2026-02-23 — done
-- [x] Group by vault, count users, sum losses — 2026-02-23 — done
-- [x] Show summary table in console — 2026-02-23 — done
-- [x] Generate `analysis_<timestamp>.json` — 2026-02-23 — done
-- [x] Add `analyze` script to `package.json` — 2026-02-23 — done
+## Milestone 3: 
+- [ ] add defindex wasms in distributor project
+- [ ] make distributor contract do deposit, take df tokens minted, compare with underlying asset and fail if user didnt receive the correct amount
+- [ ] add tests that will check that the user underlying balance delta is the corresponding amount, for every user, and that the minted dftokens is the same as returned by contract and is the same as the dftoken balance delta of the user.
 
-**Verify:** `pnpm analyze "./DeFindex Lost Funds - per_user_per_vault.csv"` produces JSON with 12 vaults, ~920 records
+## Milestone 4: Add events
+events should return more info like underlying assets of minted tokens.
 
-## Milestone 3: Deposit script (`src/deposit.ts`)
-
-- [x] Read analysis JSON — 2026-02-23 — done
-- [x] For each vault: verify balance, deposit, capture minted dfTokens — 2026-02-23 — done
-- [x] Calculate proportional distribution: `dfTokens_user = (delta_user / total_vault) * dfTokens_minted` — 2026-02-23 — done
-- [x] Generate `deposit_log_<ts>.csv` — 2026-02-23 — done
-- [x] Generate `distribution_<ts>.csv` — 2026-02-23 — done
-- [x] Add `deposit` script to `package.json` — 2026-02-23 — done
-
-**Verify:** `pnpm deposit <analysis.json>` deposits correctly, CSV sums match
-
-## Milestone 4: Distribute script (`src/distribute.ts`)
-
-- [x] Read distribution CSV — 2026-02-23 — done
-- [x] Group by vault, verify balances — 2026-02-23 — done
-- [x] Batch transfers (10) via router contract — 2026-02-23 — done
-- [x] Show statistics table — 2026-02-23 — done
-- [x] Generate `distributor_<ts>_log.csv` — 2026-02-23 — done
-- [x] Add `distribute` script to `package.json` — 2026-02-23 — done
-
-**Verify:** `pnpm distribute <distribution.csv>` transfers correctly, log complete
-
-## Milestone 5: Final documentation
-
-- [x] Rewrite `plan.md` with final flow — 2026-02-23 — done
-- [x] Mark all tasks done in `TASKS.md` — 2026-02-23 — done
-- [x] update Readme.md explaining the whole repo
-
-**Verify:** `plan.md` reflects current state
+## Milestone 5: Distribute script logs
+- when executing distribute, the user should be also check for every user, and that the minted dftokens is the same as returned by contract and is the same as the dftoken balance delta of the user.
+- return a csv of all tx hashes
