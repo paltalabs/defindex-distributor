@@ -1,12 +1,28 @@
 #![no_std]
 use soroban_fixed_point_math::SorobanFixedPoint;
-use soroban_sdk::{contract, contractimpl, token::TokenClient, vec, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, token::TokenClient, vec, Address, Env, Map, Vec,
+};
 
 // Generated client for the defindex vault (deposit + SAC df token interface).
+// The WASM is a pre-built external binary; Cargo dependency tracking and the
+// /release/deps/ path convention do not apply here.
+#[allow(unknown_lints, contract_import_dependency)]
 mod vault {
     soroban_sdk::contractimport!(
         file = "external_wasms/defindex_vault.optimized.wasm"
     );
+}
+
+/// A single recipient entry passed to [`Distributor::distribute`].
+///
+/// Defining this as a `#[contracttype]` ensures the Vec parameter is composed
+/// of validated, contract-defined types rather than raw tuples.
+#[contracttype]
+#[derive(Clone)]
+pub struct Recipient {
+    pub address: Address,
+    pub amount: i128,
 }
 
 #[contract]
@@ -35,20 +51,43 @@ impl Distributor {
         e: Env,
         caller: Address,
         vault: Address,
-        recipients: Vec<(Address, i128)>,
+        recipients: Vec<Recipient>,
     ) -> Vec<(Address, i128)> {
         caller.require_auth();
         e.storage().instance().extend_ttl(17280, 17280 * 7);
 
-        // ── 1. Sum all input amounts ──────────────────────────────────────────
+        let n = recipients.len();
+
+        // ── 1. Validate and sum all input amounts ─────────────────────────────
+        if n == 0 {
+            panic!("recipients must not be empty");
+        }
+        if n > 100 {
+            panic!("too many recipients (max 100)");
+        }
+
+        let mut seen: Map<Address, ()> = Map::new(&e);
         let mut total: i128 = 0;
-        for (_, amount) in recipients.iter() {
-            total += amount;
+        for r in recipients.iter() {
+            if r.amount <= 0 {
+                panic!("each recipient amount must be positive");
+            }
+            if r.address == vault {
+                panic!("recipient address must not be the vault");
+            }
+            if seen.contains_key(r.address.clone()) {
+                panic!("duplicate recipient address");
+            }
+            seen.set(r.address.clone(), ());
+            total = match total.checked_add(r.amount) {
+                Some(v) => v,
+                None => panic!("total overflow"),
+            };
         }
 
         // ── 2. Deposit into the defindex vault ────────────────────────────────
         // The vault pulls `total` of the underlying asset from `caller` and
-        // mints df tokens back to `caller`.  We only need the minted df_tokens amount minted.
+        // mints df tokens back to `caller`.
         let vault_client = vault::Client::new(&e, &vault);
         let (_deposited, df_tokens_minted, _allocs) = vault_client.deposit(
             &vec![&e, total], // amounts_desired  (single-asset vault)
@@ -61,24 +100,31 @@ impl Distributor {
         // The vault contract IS the df token (implements SAC).
         let df_token = TokenClient::new(&e, &vault);
 
-        let n = recipients.len();
         let mut distributed: i128 = 0;
         let mut results: Vec<(Address, i128)> = vec![&e];
         let mut i: u32 = 0;
 
-        for (user, amount) in recipients.iter() {
-            let user_df = if i == n - 1 {
+        for r in recipients.iter() {
+            // Use checked_add to detect last element without risking u32 overflow.
+            let is_last = i.checked_add(1).map_or(false, |next| next == n);
+
+            let user_df = if is_last {
                 // Last recipient gets whatever is left to avoid losing dust.
-                df_tokens_minted - distributed
+                match df_tokens_minted.checked_sub(distributed) {
+                    Some(v) => v,
+                    None => panic!("underflow distributing last recipient"),
+                }
             } else {
                 // floor( amount * df_tokens_minted / total )
-                amount.fixed_div_floor(&e, &total, &df_tokens_minted)
-                // TODO. this can be improved using get_asset_amounts_per_shares from the Vault
+                r.amount.fixed_div_floor(&e, &total, &df_tokens_minted)
             };
 
-            df_token.transfer(&caller, &user, &user_df);
-            distributed += user_df;
-            results.push_back((user, user_df));
+            df_token.transfer(&caller, &r.address, &user_df);
+            distributed = match distributed.checked_add(user_df) {
+                Some(v) => v,
+                None => panic!("distributed overflow"),
+            };
+            results.push_back((r.address, user_df));
             i += 1;
         }
 

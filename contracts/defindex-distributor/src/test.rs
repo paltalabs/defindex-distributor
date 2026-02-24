@@ -194,10 +194,10 @@ mod integration {
         // Recipients' desired share of the underlying (60 / 40 split)
         let amount1 = 600_0000000_i128;
         let amount2 = 400_0000000_i128;
-        let recipients: Vec<(Address, i128)> = vec![
+        let recipients: Vec<Recipient> = vec![
             env,
-            (recipient1.clone(), amount1),
-            (recipient2.clone(), amount2),
+            Recipient { address: recipient1.clone(), amount: amount1 },
+            Recipient { address: recipient2.clone(), amount: amount2 },
         ];
 
         // distribute() deposits `deposit_total` into the vault on behalf of
@@ -284,10 +284,10 @@ mod integration {
         let amount = 200_0000000_i128;
         f.usdc_admin.mint(&caller, &amount);
 
-        let recipients: Vec<(Address, i128)> = vec![
+        let recipients: Vec<Recipient> = vec![
             env,
-            (recipient1.clone(), 120_0000000_i128),
-            (recipient2.clone(), 80_0000000_i128),
+            Recipient { address: recipient1.clone(), amount: 120_0000000_i128 },
+            Recipient { address: recipient2.clone(), amount: 80_0000000_i128 },
         ];
 
         let results = f.distributor.distribute(&caller, &f.vault.address, &recipients);
@@ -424,10 +424,10 @@ fn test_two_recipients_exact_split() {
     // total=1000, df_minted=1000 (1:1 default)
     // user1: floor(300*1000/1000) = 300
     // user2 (last): 1000 - 300 = 700
-    let recipients: Vec<(Address, i128)> = vec![
+    let recipients: Vec<Recipient> = vec![
         &env,
-        (recipient1.clone(), 300_i128),
-        (recipient2.clone(), 700_i128),
+        Recipient { address: recipient1.clone(), amount: 300_i128 },
+        Recipient { address: recipient2.clone(), amount: 700_i128 },
     ];
 
     let results = client.distribute(&caller, &vault_id, &recipients);
@@ -459,10 +459,10 @@ fn test_uneven_split_floors_correctly() {
     // total=3, df_minted=10
     // user1: floor(1 * 10 / 3) = floor(3.33) = 3
     // user2 (last): 10 - 3 = 7
-    let recipients: Vec<(Address, i128)> = vec![
+    let recipients: Vec<Recipient> = vec![
         &env,
-        (recipient1.clone(), 1_i128),
-        (recipient2.clone(), 2_i128),
+        Recipient { address: recipient1.clone(), amount: 1_i128 },
+        Recipient { address: recipient2.clone(), amount: 2_i128 },
     ];
 
     let results = client.distribute(&caller, &vault_id, &recipients);
@@ -494,11 +494,11 @@ fn test_rounding_remainder_goes_to_last() {
     // user1: floor(3 * 10 / 9) = floor(3.33) = 3
     // user2: floor(3 * 10 / 9) = floor(3.33) = 3
     // user3 (last): 10 - 3 - 3 = 4  (gets remainder, not floor(3.33)=3)
-    let recipients: Vec<(Address, i128)> = vec![
+    let recipients: Vec<Recipient> = vec![
         &env,
-        (recipient1.clone(), 3_i128),
-        (recipient2.clone(), 3_i128),
-        (recipient3.clone(), 3_i128),
+        Recipient { address: recipient1.clone(), amount: 3_i128 },
+        Recipient { address: recipient2.clone(), amount: 3_i128 },
+        Recipient { address: recipient3.clone(), amount: 3_i128 },
     ];
 
     let results = client.distribute(&caller, &vault_id, &recipients);
@@ -524,9 +524,9 @@ fn test_single_recipient_gets_all_df_tokens() {
     // Vault issues 999 df tokens for 500 units in
     vault.preset_df_mint(&999_i128);
 
-    let recipients: Vec<(Address, i128)> = vec![
+    let recipients: Vec<Recipient> = vec![
         &env,
-        (recipient.clone(), 500_i128),
+        Recipient { address: recipient.clone(), amount: 500_i128 },
     ];
 
     let results = client.distribute(&caller, &vault_id, &recipients);
@@ -552,13 +552,13 @@ fn test_no_df_tokens_lost_to_rounding() {
 
     let users: [Address; 5] = core::array::from_fn(|_| Address::generate(&env));
 
-    let recipients: Vec<(Address, i128)> = vec![
+    let recipients: Vec<Recipient> = vec![
         &env,
-        (users[0].clone(), 1_i128),
-        (users[1].clone(), 1_i128),
-        (users[2].clone(), 2_i128),
-        (users[3].clone(), 1_i128),
-        (users[4].clone(), 2_i128),
+        Recipient { address: users[0].clone(), amount: 1_i128 },
+        Recipient { address: users[1].clone(), amount: 1_i128 },
+        Recipient { address: users[2].clone(), amount: 2_i128 },
+        Recipient { address: users[3].clone(), amount: 1_i128 },
+        Recipient { address: users[4].clone(), amount: 2_i128 },
     ];
 
     let results = client.distribute(&caller, &vault_id, &recipients);
