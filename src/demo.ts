@@ -159,7 +159,6 @@ function buildCreateVaultOperation(
 }
 
 // ── Main ──
-
 async function main() {
   const network = getNetwork();
   if (network !== "testnet") {
@@ -270,32 +269,18 @@ async function main() {
   const usersByVault: Record<string, { publicKey: string; keypair: Keypair }[]> = {};
 
   for (const vault of vaults) {
-    const needsMint = vault.asset === TESTNET_USDC || vault.asset === TESTNET_XTAR;
+    
     console.log(`  Vault ${vault.address.substring(0, 8)}... (${vault.assetName}):`);
     usersByVault[vault.address] = [];
 
     for (let j = 0; j < USERS_PER_VAULT; j++) {
       const userKeypair = Keypair.random();
       const userPublicKey = userKeypair.publicKey();
+      usersByVault[vault.address].push({ publicKey: userPublicKey, keypair: userKeypair });
 
-      try {
-        await fundWithFriendbot(userPublicKey);
-
-        // Mint Soroban tokens for users in non-XLM vaults
-        if (needsMint) {
-          await mintSoroswapToken(userPublicKey, vault.asset);
-        }
-
-        usersByVault[vault.address].push({ publicKey: userPublicKey, keypair: userKeypair });
-
-        if ((j + 1) % 5 === 0 || j === USERS_PER_VAULT - 1) {
-          console.log(`    Funded ${j + 1}/${USERS_PER_VAULT} users${needsMint ? ` (+ ${vault.assetName} minted)` : ""}`);
-        }
-      } catch (error) {
-        console.error(`    Failed to fund user ${j + 1}:`, error);
-        // Continue with other users
+      if ((j + 1) % 5 === 0 || j === USERS_PER_VAULT - 1) {
+        console.log(`    Funded ${j + 1}/${USERS_PER_VAULT} users }`);
       }
-
       // Small delay to avoid rate limiting
       await new Promise((r) => setTimeout(r, 500));
     }
@@ -303,7 +288,7 @@ async function main() {
   console.log("");
 
   // Step 4: Generate simulated data
-  console.log("Step 4: Generating simulated loss data...");
+  console.log("Step 4: Generating simulated data...");
   const csvRows: string[] = ["vault,asset,user,amount"];
 
   for (const vault of vaults) {
@@ -334,8 +319,8 @@ async function main() {
   console.log("");
   console.log("Next steps:");
   console.log(`  1. pnpm analyze output/demo/${csvFilename}`);
-  console.log(`  2. STELLAR_NETWORK=testnet pnpm deposit output/demo/${csvFilename.replace(".csv", ".json")}`);
-  console.log(`  3. STELLAR_NETWORK=testnet pnpm distribute output/demo/${csvFilename.replace(".csv", ".distribution.csv")}`);
+  console.log(`  2. pnpm deposit output/demo/${csvFilename}.json`);
+  console.log(`  3. pnpm distribute output/deposit/${csvFilename}distribution.csv`);
   console.log("=".repeat(60));
 }
 
