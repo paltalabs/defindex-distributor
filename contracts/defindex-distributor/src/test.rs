@@ -112,7 +112,6 @@ fn test_two_recipients_exact_split() {
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller     = Address::generate(&env);
-    let token      = Address::generate(&env);
     let recipient1 = Address::generate(&env);
     let recipient2 = Address::generate(&env);
 
@@ -125,7 +124,7 @@ fn test_two_recipients_exact_split() {
         (recipient2.clone(), 700_i128),
     ];
 
-    let results = client.distribute(&caller, &vault_id, &token, &recipients);
+    let results = client.distribute(&caller, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient1.clone(), 300_i128));
     assert_eq!(results.get(1).unwrap(), (recipient2.clone(), 700_i128));
@@ -145,7 +144,6 @@ fn test_uneven_split_floors_correctly() {
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller     = Address::generate(&env);
-    let token      = Address::generate(&env);
     let recipient1 = Address::generate(&env);
     let recipient2 = Address::generate(&env);
 
@@ -161,7 +159,7 @@ fn test_uneven_split_floors_correctly() {
         (recipient2.clone(), 2_i128),
     ];
 
-    let results = client.distribute(&caller, &vault_id, &token, &recipients);
+    let results = client.distribute(&caller, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient1.clone(), 3_i128));
     assert_eq!(results.get(1).unwrap(), (recipient2.clone(), 7_i128));
@@ -179,7 +177,6 @@ fn test_rounding_remainder_goes_to_last() {
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller     = Address::generate(&env);
-    let token      = Address::generate(&env);
     let recipient1 = Address::generate(&env);
     let recipient2 = Address::generate(&env);
     let recipient3 = Address::generate(&env);
@@ -198,7 +195,7 @@ fn test_rounding_remainder_goes_to_last() {
         (recipient3.clone(), 3_i128),
     ];
 
-    let results = client.distribute(&caller, &vault_id, &token, &recipients);
+    let results = client.distribute(&caller, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient1.clone(), 3_i128));
     assert_eq!(results.get(1).unwrap(), (recipient2.clone(), 3_i128));
@@ -216,7 +213,6 @@ fn test_single_recipient_gets_all_df_tokens() {
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller    = Address::generate(&env);
-    let token     = Address::generate(&env);
     let recipient = Address::generate(&env);
 
     // Vault issues 999 df tokens for 500 units in
@@ -227,7 +223,7 @@ fn test_single_recipient_gets_all_df_tokens() {
         (recipient.clone(), 500_i128),
     ];
 
-    let results = client.distribute(&caller, &vault_id, &token, &recipients);
+    let results = client.distribute(&caller, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient.clone(), 999_i128));
     assert_eq!(vault.balance(&recipient), 999_i128);
@@ -243,7 +239,6 @@ fn test_no_df_tokens_lost_to_rounding() {
     let (vault_id, client) = setup(&env);
 
     let caller = Address::generate(&env);
-    let token  = Address::generate(&env);
 
     let vault = MockVaultClient::new(&env, &vault_id);
     // 7 inputs → 13 df tokens: guarantees non-trivial rounding
@@ -260,7 +255,7 @@ fn test_no_df_tokens_lost_to_rounding() {
         (users[4].clone(), 2_i128),
     ];
 
-    let results = client.distribute(&caller, &vault_id, &token, &recipients);
+    let results = client.distribute(&caller, &vault_id, &recipients);
 
     let total_distributed: i128 = (0..5_u32).map(|i| results.get(i).unwrap().1).sum();
     assert_eq!(total_distributed, 13_i128);

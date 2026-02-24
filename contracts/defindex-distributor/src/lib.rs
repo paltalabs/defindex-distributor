@@ -2,7 +2,7 @@
 use soroban_fixed_point_math::SorobanFixedPoint;
 use soroban_sdk::{contract, contractimpl, token::TokenClient, vec, Address, Env, Vec};
 
-// Generated client for the defindex vault (deposit + SEP-41 df token interface).
+// Generated client for the defindex vault (deposit + SAC df token interface).
 mod vault {
     soroban_sdk::contractimport!(
         file = "external_wasms/defindex_vault.optimized.wasm"
@@ -22,24 +22,23 @@ impl Distributor {
     ///
     /// # Auth
     /// `caller` must authorise this invocation AND the nested sub-invocations:
-    ///   - `token.transfer(caller → vault, total)`   (pulled by the vault internally)
+    ///   - underlying token transfer from `caller` to the vault (pulled internally by the vault)
     ///   - `vault_df_token.transfer(caller → userN, amountN)` for every recipient
     ///
     /// # Pro-rata note
-    /// Because the vault's share price may differ from 1:1, the df tokens each
-    /// user ends up with represent the correct *proportion* of the deposited
-    /// underlying, but the underlying equivalent per user ≠ their input amount.
+    /// The vault may have a share price != 1:1 (e.g. 1 df token = 1.05 USDC if
+    /// the vault has accrued yield).  As a result, the number of df tokens each
+    /// user receives will differ from their input amount, but *proportionality*
+    /// is preserved: a user who contributed X% of the total receives X% of the
+    /// minted df tokens, which redeems for exactly X% of the deposited underlying.
     pub fn distribute(
         e: Env,
         caller: Address,
         vault: Address,
-        token: Address,
         recipients: Vec<(Address, i128)>,
     ) -> Vec<(Address, i128)> {
         caller.require_auth();
         e.storage().instance().extend_ttl(17280, 17280 * 7);
-
-        let _ = &token; // underlying asset; the vault pulls it from caller internally
 
         // ── 1. Sum all input amounts ──────────────────────────────────────────
         let mut total: i128 = 0;
@@ -74,6 +73,7 @@ impl Distributor {
             } else {
                 // floor( amount * df_tokens_minted / total )
                 amount.fixed_div_floor(&e, &total, &df_tokens_minted)
+                // TODO. this can be improved using get_asset_amounts_per_shares from the Vault
             };
 
             df_token.transfer(&caller, &user, &user_df);
