@@ -9,6 +9,8 @@ import {
   sendTransaction,
   simulateContractCall,
   getOutputPath,
+  batchArray,
+  BATCH_SIZE,
 } from "./utils";
 
 config();
@@ -38,13 +40,12 @@ interface TransferLogEntry {
   df_balance_after: string;
   df_balance_delta: string;
   tx_hash: string;
+  batch_number: number;
   status: string;
 }
 
 // ── CSV Parsing ──
-// Accepts two formats:
-//   Demo CSV:         vault, asset, user, amount
-//   Deposit dist CSV: vault_id, user_address, underlying_amount, df_tokens_to_receive
+// Accepts demo CSV format: vault, asset, user, amount
 function parseCSV(filePath: string): CsvRecord[] {
   const absolutePath = path.resolve(filePath);
   if (!fs.existsSync(absolutePath)) {
@@ -60,29 +61,17 @@ function parseCSV(filePath: string): CsvRecord[] {
 
   const header = lines[0].toLowerCase().split(",").map((h) => h.trim());
 
-  // Detect format: demo CSV vs deposit distribution CSV
-  const isDemoFormat = header.includes("vault") && header.includes("asset") && header.includes("user") && header.includes("amount");
-  const isDepositFormat = header.includes("vault_id") && header.includes("user_address") && header.includes("underlying_amount");
-
-  if (!isDemoFormat && !isDepositFormat) {
+  const hasRequired = header.includes("vault") && header.includes("asset") && header.includes("user") && header.includes("amount");
+  if (!hasRequired) {
     throw new Error(
-      'CSV format not recognized. Expected either:\n' +
-      '  Demo:    "vault", "asset", "user", "amount"\n' +
-      '  Deposit: "vault_id", "user_address", "underlying_amount"'
+      'CSV format not recognized. Expected columns: "vault", "asset", "user", "amount"'
     );
   }
 
-  const vaultIdx = header.indexOf(isDemoFormat ? "vault" : "vault_id");
-  const assetIdx = isDemoFormat ? header.indexOf("asset") : -1;
-  const userIdx = header.indexOf(isDemoFormat ? "user" : "user_address");
-  const amountIdx = header.indexOf(isDemoFormat ? "amount" : "underlying_amount");
-
-  if (isDemoFormat) {
-    console.log("  Detected demo CSV format (vault, asset, user, amount)");
-  } else {
-    console.log("  Detected deposit distribution CSV format (vault_id, user_address, underlying_amount)");
-    console.log("  Asset will be resolved via RPC per vault");
-  }
+  const vaultIdx = header.indexOf("vault");
+  const assetIdx = header.indexOf("asset");
+  const userIdx = header.indexOf("user");
+  const amountIdx = header.indexOf("amount");
 
   const records: CsvRecord[] = [];
 
@@ -99,7 +88,7 @@ function parseCSV(filePath: string): CsvRecord[] {
 
     records.push({
       vault: values[vaultIdx],
-      asset: assetIdx !== -1 ? values[assetIdx] : "",
+      asset: values[assetIdx],
       user: values[userIdx],
       amount,
     });
@@ -121,28 +110,6 @@ function groupByVault(records: CsvRecord[]): Map<string, VaultGroup> {
   }
 
   return groups;
-}
-
-// Resolve missing asset addresses via vault's get_assets RPC call
-async function resolveVaultAssets(
-  vaultGroups: Map<string, VaultGroup>,
-  callerPublicKey: string
-): Promise<void> {
-  for (const [vaultId, group] of vaultGroups) {
-    if (group.asset) continue;
-
-    console.log(`  Resolving asset for vault ${vaultId.substring(0, 12)}...`);
-    const assetAddresses = await simulateContractCall(
-      vaultId, "get_assets", [], callerPublicKey
-    ) as { address: string }[];
-
-    if (!assetAddresses || assetAddresses.length === 0) {
-      throw new Error(`Could not resolve asset for vault ${vaultId}`);
-    }
-
-    group.asset = assetAddresses[0].address;
-    console.log(`    → ${group.asset}`);
-  }
 }
 
 // ── Balance Fetching ──
@@ -276,10 +243,8 @@ async function main() {
 
   console.log(`Total records: ${records.length}`);
   console.log(`Vaults: ${vaultGroups.size}`);
+  console.log(`Batch size: ${BATCH_SIZE}`);
   console.log("");
-
-  // Resolve missing asset addresses (deposit CSV format)
-  await resolveVaultAssets(vaultGroups, sourcePublicKey);
 
   if (records.length === 0) {
     console.log("No valid records to process.");
@@ -292,14 +257,16 @@ async function main() {
   for (const [vaultId, group] of vaultGroups) {
     const totalAmount = group.recipients.reduce((sum, r) => sum + r.amount, 0n);
     const users = group.recipients.map((r) => r.user);
+    const batches = batchArray(group.recipients, BATCH_SIZE);
 
     console.log("-".repeat(60));
     console.log(`Vault: ${vaultId}`);
     console.log(`Asset: ${group.asset}`);
     console.log(`Recipients: ${group.recipients.length} | Total amount: ${totalAmount}`);
+    console.log(`Batches: ${batches.length} (batch size: ${BATCH_SIZE})`);
     console.log("");
 
-    // 2a. Pre-fetch dfToken balances
+    // 2a. Pre-fetch dfToken balances (once for all users of this vault)
     console.log("  Fetching dfToken balances before...");
     const balancesBefore = await fetchBalances(vaultId, users, sourcePublicKey);
     for (const [user, bal] of balancesBefore) {
@@ -307,59 +274,104 @@ async function main() {
     }
     console.log("");
 
-    // 2b. Build and send distribute transaction
-    console.log("  Building distribute transaction...");
-    const operation = buildDistributeOperation(
-      sourcePublicKey,
-      vaultId,
-      group.asset,
-      group.recipients
-    );
+    // 2b. Process each batch
+    const allDfTokensFromContract = new Map<string, bigint>();
+    const txHashes = new Map<string, string>(); // user -> txHash
 
-    let txHash = "";
-    let dfTokensFromContract = new Map<string, bigint>();
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      const batchNum = batchIdx + 1;
+      const batchTotal = batch.reduce((sum, r) => sum + r.amount, 0n);
 
-    try {
-      txHash = await buildAndSendTx(sourceKeypair, operation);
-      console.log(`  TX confirmed: ${txHash}`);
+      console.log(`  Batch ${batchNum}/${batches.length} (${batch.length} recipients, total: ${batchTotal})`);
+      console.log("  Building distribute transaction...");
 
-      // 2c. Parse contract return value
-      const txResult = await rpcServer.getTransaction(txHash);
-      if (txResult.status === "SUCCESS" && txResult.returnValue) {
-        dfTokensFromContract = parseContractResult(txResult.returnValue);
-        console.log("  Contract returned dfTokens per user:");
-        for (const [user, tokens] of dfTokensFromContract) {
-          console.log(`    ${user.substring(0, 12)}... → ${tokens}`);
-        }
-      } else {
-        console.warn(`  WARNING: TX status=${txResult.status}, no return value`);
-      }
-      console.log("");
-
-      // 2d. Post-fetch dfToken balances
-      console.log("  Fetching dfToken balances after...");
-      const balancesAfter = await fetchBalances(vaultId, users, sourcePublicKey);
-
-      // 2e. Build log entries and display table
-      console.log("");
-      console.log("  Results:");
-      console.log("  " + "-".repeat(120));
-      console.log(
-        `  ${"User".padEnd(16)} ${"Amt Sent".padStart(14)} ${"dfTok Recv".padStart(14)} ${"Bal Before".padStart(14)} ${"Bal After".padStart(14)} ${"Delta".padStart(14)}`
+      const operation = buildDistributeOperation(
+        sourcePublicKey,
+        vaultId,
+        group.asset,
+        batch
       );
-      console.log("  " + "-".repeat(120));
 
-      for (const recipient of group.recipients) {
+      try {
+        const txHash = await buildAndSendTx(sourceKeypair, operation);
+        console.log(`  TX confirmed: ${txHash}`);
+
+        // Parse contract return value
+        const txResult = await rpcServer.getTransaction(txHash);
+        if (txResult.status === "SUCCESS" && txResult.returnValue) {
+          const batchDfTokens = parseContractResult(txResult.returnValue);
+          console.log(`  Contract returned dfTokens for batch ${batchNum}:`);
+          for (const [user, tokens] of batchDfTokens) {
+            console.log(`    ${user.substring(0, 12)}... → ${tokens}`);
+            allDfTokensFromContract.set(user, tokens);
+            txHashes.set(user, txHash);
+          }
+        } else {
+          console.warn(`  WARNING: TX status=${txResult.status}, no return value`);
+          for (const r of batch) {
+            txHashes.set(r.user, txHash);
+          }
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.error(`  Batch ${batchNum} FAILED: ${errorMsg}`);
+
+        for (const recipient of batch) {
+          const before = balancesBefore.get(recipient.user) ?? 0n;
+          transferLog.push({
+            vault: vaultId,
+            user: recipient.user,
+            amount_sent: recipient.amount.toString(),
+            df_tokens_received: "0",
+            df_balance_before: before.toString(),
+            df_balance_after: before.toString(),
+            df_balance_delta: "0",
+            tx_hash: "",
+            batch_number: batchNum,
+            status: `failed: ${errorMsg}`,
+          });
+        }
+      }
+
+      console.log("");
+    }
+
+    // 2c. Post-fetch dfToken balances (once for all users of this vault)
+    console.log("  Fetching dfToken balances after...");
+    const balancesAfter = await fetchBalances(vaultId, users, sourcePublicKey);
+
+    // 2d. Build log entries and display comparison table
+    console.log("");
+    console.log("  Results:");
+    console.log("  " + "-".repeat(130));
+    console.log(
+      `  ${"User".padEnd(16)} ${"Batch".padStart(5)} ${"Amt Sent".padStart(14)} ${"dfTok Recv".padStart(14)} ${"Bal Before".padStart(14)} ${"Bal After".padStart(14)} ${"Delta".padStart(14)}`
+    );
+    console.log("  " + "-".repeat(130));
+
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      const batchNum = batchIdx + 1;
+
+      for (const recipient of batch) {
+        // Skip users already logged as failed in their batch
+        const alreadyLogged = transferLog.some(
+          (e) => e.vault === vaultId && e.user === recipient.user && e.batch_number === batchNum
+        );
+        if (alreadyLogged) continue;
+
         const before = balancesBefore.get(recipient.user) ?? 0n;
         const after = balancesAfter.get(recipient.user) ?? 0n;
         const delta = after - before;
-        const contractDf = dfTokensFromContract.get(recipient.user) ?? 0n;
+        const contractDf = allDfTokensFromContract.get(recipient.user) ?? 0n;
+        const txHash = txHashes.get(recipient.user) ?? "";
 
         const deltaMatch = delta === contractDf;
         const marker = deltaMatch ? "" : " MISMATCH";
 
         console.log(
-          `  ${recipient.user.substring(0, 16)} ${recipient.amount.toString().padStart(14)} ${contractDf.toString().padStart(14)} ${before.toString().padStart(14)} ${after.toString().padStart(14)} ${delta.toString().padStart(14)}${marker}`
+          `  ${recipient.user.substring(0, 16)} ${batchNum.toString().padStart(5)} ${recipient.amount.toString().padStart(14)} ${contractDf.toString().padStart(14)} ${before.toString().padStart(14)} ${after.toString().padStart(14)} ${delta.toString().padStart(14)}${marker}`
         );
 
         transferLog.push({
@@ -371,31 +383,13 @@ async function main() {
           df_balance_after: after.toString(),
           df_balance_delta: delta.toString(),
           tx_hash: txHash,
+          batch_number: batchNum,
           status: "success",
-        });
-      }
-
-      console.log("  " + "-".repeat(120));
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`  FAILED: ${errorMsg}`);
-
-      for (const recipient of group.recipients) {
-        const before = balancesBefore.get(recipient.user) ?? 0n;
-        transferLog.push({
-          vault: vaultId,
-          user: recipient.user,
-          amount_sent: recipient.amount.toString(),
-          df_tokens_received: "0",
-          df_balance_before: before.toString(),
-          df_balance_after: before.toString(),
-          df_balance_delta: "0",
-          tx_hash: "",
-          status: `failed: ${errorMsg}`,
         });
       }
     }
 
+    console.log("  " + "-".repeat(130));
     console.log("");
   }
 
@@ -403,10 +397,10 @@ async function main() {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const logPath = getOutputPath("distributor", `distributor_${ts}.csv`);
   const logContent = [
-    "vault,user,amount_sent,df_tokens_received,df_balance_before,df_balance_after,df_balance_delta,tx_hash,status",
+    "vault,user,amount_sent,df_tokens_received,df_balance_before,df_balance_after,df_balance_delta,tx_hash,batch_number,status",
     ...transferLog.map(
       (e) =>
-        `${e.vault},${e.user},${e.amount_sent},${e.df_tokens_received},${e.df_balance_before},${e.df_balance_after},${e.df_balance_delta},${e.tx_hash},"${e.status}"`
+        `${e.vault},${e.user},${e.amount_sent},${e.df_tokens_received},${e.df_balance_before},${e.df_balance_after},${e.df_balance_delta},${e.tx_hash},${e.batch_number},"${e.status}"`
     ),
   ].join("\n");
   fs.writeFileSync(logPath, logContent);
