@@ -16,7 +16,7 @@ interface LostFundsRecord {
 }
 
 interface VaultAnalysis {
-  total_loss: string;
+  amount: string;
   user_count: number;
   users: { address: string; underlying_amount: string }[];
 }
@@ -188,7 +188,7 @@ function main() {
   for (const record of records) {
     if (!vaults[record.vault_id]) {
       vaults[record.vault_id] = {
-        total_loss: "0",
+        amount: "0",
         user_count: 0,
         users: [],
       };
@@ -199,7 +199,7 @@ function main() {
     const delta = BigInt(record.underlying_amount);
     const absDelta = delta < 0n ? -delta : delta;
 
-    vault.total_loss = (BigInt(vault.total_loss) + absDelta).toString();
+    vault.amount = (BigInt(vault.amount) + absDelta).toString();
     vault.user_count += 1;
     vault.users.push({
       address: record.user_address,
@@ -211,7 +211,7 @@ function main() {
   console.log("Vault Summary:");
   console.log("-".repeat(100));
   console.log(
-    `${"Vault ID".padEnd(58)} ${"Users".padStart(6)} ${"Total Loss (stroops)".padStart(25)}`
+    `${"Vault ID".padEnd(58)} ${"Users".padStart(6)} ${"Total amount (stroops)".padStart(25)}`
   );
   console.log("-".repeat(100));
 
@@ -219,22 +219,22 @@ function main() {
     (a, b) => vaults[b].user_count - vaults[a].user_count
   );
 
-  let grandTotalLoss = 0n;
+  let grandTotalAmount = 0n;
   let grandTotalUsers = 0;
 
   for (const vaultId of vaultIds) {
     const vault = vaults[vaultId];
-    grandTotalLoss += BigInt(vault.total_loss);
+    grandTotalAmount += BigInt(vault.amount);
     grandTotalUsers += vault.user_count;
 
     console.log(
-      `${vaultId.padEnd(58)} ${vault.user_count.toString().padStart(6)} ${vault.total_loss.padStart(25)}`
+      `${vaultId.padEnd(58)} ${vault.user_count.toString().padStart(6)} ${vault.amount.padStart(25)}`
     );
   }
 
   console.log("-".repeat(100));
   console.log(
-    `${"TOTAL".padEnd(58)} ${grandTotalUsers.toString().padStart(6)} ${grandTotalLoss.toString().padStart(25)}`
+    `${"TOTAL".padEnd(58)} ${grandTotalUsers.toString().padStart(6)} ${grandTotalAmount.toString().padStart(25)}`
   );
   console.log("");
 
@@ -255,7 +255,7 @@ function main() {
   console.log(`Analysis written to: ${outputPath}`);
   console.log("");
   console.log("=".repeat(60));
-  console.log(`Vaults: ${vaultIds.length} | Users: ${grandTotalUsers} | Total Loss: ${grandTotalLoss} stroops`);
+  console.log(`Vaults: ${vaultIds.length} | Users: ${grandTotalUsers} | Total Amount: ${grandTotalAmount} stroops`);
   console.log("=".repeat(60));
 }
 

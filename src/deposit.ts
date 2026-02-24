@@ -15,7 +15,7 @@ config();
 
 // Types
 interface VaultAnalysis {
-  total_to_distribute: string;
+  amount: string;
   user_count: number;
   users: { address: string; underlying_amount: string }[];
 }
@@ -102,7 +102,8 @@ async function main() {
 
   for (const vaultId of vaultIds) {
     const vault = analysis.vaults[vaultId];
-    const totalToDistribute = BigInt(vault.total_to_distribute);
+    console.log(`Processing vault ${vaultId} with ${vault.user_count} users and total amount ${vault.amount}...`);
+    const totalToDistribute = BigInt(vault.amount);
 
     console.log("-".repeat(60));
     console.log(`Vault: ${vaultId}`);
