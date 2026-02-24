@@ -27,11 +27,48 @@ interface DistributionRecord {
 interface TransferLogEntry {
   vault_id: string;
   user_address: string;
-  df_tokens_transferred: string;
+  df_tokens_expected: string;
+  df_tokens_before: string;
+  df_tokens_after: string;
+  df_tokens_delta: string;
   tx_hash: string;
+  tx_result: string;
   batch_number: number;
   timestamp: string;
   status: string;
+}
+
+// Get dfToken balance for a user in a vault
+async function getDfTokenBalance(vaultId: string, userAddress: string, callerPublicKey: string): Promise<bigint> {
+  try {
+    const result = await simulateContractCall(
+      vaultId,
+      "balance",
+      [new Address(userAddress).toScVal()],
+      callerPublicKey
+    );
+    return BigInt(result as string | number);
+  } catch {
+    return 0n;
+  }
+}
+
+// Batch-fetch dfToken balances for multiple users across vaults
+async function getBatchBalances(
+  records: DistributionRecord[],
+  callerPublicKey: string
+): Promise<Map<string, bigint>> {
+  const balances = new Map<string, bigint>();
+
+  for (const record of records) {
+    const key = `${record.vault_id}:${record.user_address}`;
+    if (!balances.has(key)) {
+      const balance = await getDfTokenBalance(record.vault_id, record.user_address, callerPublicKey);
+      balances.set(key, balance);
+    }
+  }
+
+  return balances;
 }
 
 // Parse distribution CSV
@@ -148,8 +185,8 @@ async function main() {
     vaultGroups[record.vault_id].push(record);
   }
 
-  // Verify balances per vault
-  console.log("Verifying dfToken balances per vault...");
+  // Verify source balances per vault
+  console.log("Verifying source dfToken balances per vault...");
   for (const vaultId of Object.keys(vaultGroups)) {
     const vaultRecords = vaultGroups[vaultId];
     const totalNeeded = vaultRecords.reduce(
@@ -157,13 +194,7 @@ async function main() {
       0n
     );
 
-    const balanceResult = await simulateContractCall(
-      vaultId,
-      "balance",
-      [new Address(sourcePublicKey).toScVal()],
-      sourcePublicKey
-    );
-    const balance = BigInt(balanceResult as string | number);
+    const balance = await getDfTokenBalance(vaultId, sourcePublicKey, sourcePublicKey);
 
     const status = balance >= totalNeeded ? "OK" : "INSUFFICIENT";
     console.log(
@@ -176,12 +207,21 @@ async function main() {
   }
   console.log("");
 
+  // Fetch all user dfToken balances BEFORE distribution
+  console.log("Fetching user dfToken balances before distribution...");
+  const balancesBefore = await getBatchBalances(records, sourcePublicKey);
+  console.log(`  Fetched ${balancesBefore.size} balances`);
+  console.log("");
+
   // Batch all transfers (across vaults)
   const batches = batchArray(records, BATCH_SIZE);
   console.log(`Total batches: ${batches.length} (${BATCH_SIZE} transfers per batch)`);
   console.log("");
 
   const transferLog: TransferLogEntry[] = [];
+  // Track which records succeeded for post-balance fetching
+  const successRecords: DistributionRecord[] = [];
+  const failedRecords: DistributionRecord[] = [];
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
@@ -196,44 +236,68 @@ async function main() {
       )
     );
 
-    // Show batch details
+    // Show what will be sent
+    console.log("  Sending transfers:");
     for (const record of batch) {
+      const key = `${record.vault_id}:${record.user_address}`;
+      const before = balancesBefore.get(key) ?? 0n;
       console.log(
-        `  -> ${record.user_address} (vault ${record.vault_id.substring(0, 8)}...): ${record.df_tokens_to_receive} dfTokens`
+        `    ${sourcePublicKey.substring(0, 8)}... → ${record.user_address.substring(0, 8)}... | vault: ${record.vault_id.substring(0, 8)}... | amount: ${record.df_tokens_to_receive} dfTokens | user balance: ${before}`
       );
     }
 
     try {
       const tx = await buildRouterTransaction(sourceKeypair, invocations);
       const txHash = await sendTransaction(tx);
-      console.log(`  Batch ${i + 1} completed: ${txHash}`);
+
+      // Fetch full transaction result from RPC
+      const txResponse = await rpcServer.getTransaction(txHash);
+      const txResult = txResponse.status;
+      console.log(`  Result: ${txResult} | TX: ${txHash}`);
 
       const now = new Date().toISOString();
       for (const record of batch) {
+        const key = `${record.vault_id}:${record.user_address}`;
+        const before = balancesBefore.get(key) ?? 0n;
+
         transferLog.push({
           vault_id: record.vault_id,
           user_address: record.user_address,
-          df_tokens_transferred: record.df_tokens_to_receive,
+          df_tokens_expected: record.df_tokens_to_receive,
+          df_tokens_before: before.toString(),
+          df_tokens_after: "",  // filled after all batches
+          df_tokens_delta: "",  // filled after all batches
           tx_hash: txHash,
+          tx_result: txResult,
           batch_number: i + 1,
           timestamp: now,
           status: "success",
         });
+        successRecords.push(record);
       }
     } catch (error) {
-      console.error(`  Batch ${i + 1} FAILED:`, error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`  Result: FAILED | ${errorMsg}`);
 
       const now = new Date().toISOString();
       for (const record of batch) {
+        const key = `${record.vault_id}:${record.user_address}`;
+        const before = balancesBefore.get(key) ?? 0n;
+
         transferLog.push({
           vault_id: record.vault_id,
           user_address: record.user_address,
-          df_tokens_transferred: record.df_tokens_to_receive,
+          df_tokens_expected: record.df_tokens_to_receive,
+          df_tokens_before: before.toString(),
+          df_tokens_after: before.toString(),
+          df_tokens_delta: "0",
           tx_hash: "",
+          tx_result: `FAILED: ${errorMsg}`,
           batch_number: i + 1,
           timestamp: now,
           status: "failed",
         });
+        failedRecords.push(record);
       }
 
       // Don't throw — continue with remaining batches
@@ -243,14 +307,52 @@ async function main() {
     console.log("");
   }
 
+  // Fetch all user dfToken balances AFTER distribution (only for successful records)
+  if (successRecords.length > 0) {
+    console.log("Fetching user dfToken balances after distribution...");
+    const balancesAfter = await getBatchBalances(successRecords, sourcePublicKey);
+    console.log(`  Fetched ${balancesAfter.size} balances`);
+    console.log("");
+
+    // Fill in after/delta for successful entries
+    for (const entry of transferLog) {
+      if (entry.status !== "success") continue;
+
+      const key = `${entry.vault_id}:${entry.user_address}`;
+      const after = balancesAfter.get(key) ?? 0n;
+      const before = BigInt(entry.df_tokens_before);
+
+      entry.df_tokens_after = after.toString();
+      entry.df_tokens_delta = (after - before).toString();
+    }
+
+    // Show per-user results
+    console.log("Distribution results:");
+    console.log("-".repeat(120));
+    console.log(
+      `${"User".padEnd(58)} ${"Expected".padStart(14)} ${"Before".padStart(14)} ${"After".padStart(14)} ${"Delta".padStart(14)}`
+    );
+    console.log("-".repeat(120));
+
+    for (const entry of transferLog) {
+      const deltaMatch = entry.df_tokens_delta === entry.df_tokens_expected;
+      const marker = entry.status === "failed" ? " FAILED" : deltaMatch ? "" : " MISMATCH";
+      console.log(
+        `${entry.user_address.padEnd(58)} ${entry.df_tokens_expected.padStart(14)} ${entry.df_tokens_before.padStart(14)} ${entry.df_tokens_after.padStart(14)} ${entry.df_tokens_delta.padStart(14)}${marker}`
+      );
+    }
+    console.log("-".repeat(120));
+    console.log("");
+  }
+
   // Write transfer log CSV
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const logPath = getOutputPath("distributions", `distributor_${ts}_log.csv`);
   const logContent = [
-    "vault_id,user_address,df_tokens_transferred,tx_hash,batch_number,timestamp,status",
+    "vault_id,user_address,df_tokens_expected,df_tokens_before,df_tokens_after,df_tokens_delta,tx_hash,tx_result,batch_number,timestamp,status",
     ...transferLog.map(
       (e) =>
-        `${e.vault_id},${e.user_address},${e.df_tokens_transferred},${e.tx_hash},${e.batch_number},${e.timestamp},${e.status}`
+        `${e.vault_id},${e.user_address},${e.df_tokens_expected},${e.df_tokens_before},${e.df_tokens_after},${e.df_tokens_delta},${e.tx_hash},"${e.tx_result}",${e.batch_number},${e.timestamp},${e.status}`
     ),
   ].join("\n");
   fs.writeFileSync(logPath, logContent);
@@ -259,9 +361,12 @@ async function main() {
   // Final statistics
   const successCount = transferLog.filter((e) => e.status === "success").length;
   const failedCount = transferLog.filter((e) => e.status === "failed").length;
-  const totalTransferred = transferLog
+  const totalExpected = transferLog
     .filter((e) => e.status === "success")
-    .reduce((sum, e) => sum + BigInt(e.df_tokens_transferred), 0n);
+    .reduce((sum, e) => sum + BigInt(e.df_tokens_expected), 0n);
+  const totalActualDelta = transferLog
+    .filter((e) => e.status === "success")
+    .reduce((sum, e) => sum + BigInt(e.df_tokens_delta || "0"), 0n);
 
   console.log("");
   console.log("=".repeat(60));
@@ -270,7 +375,11 @@ async function main() {
   console.log(`Total transfers: ${transferLog.length}`);
   console.log(`  Successful: ${successCount}`);
   console.log(`  Failed: ${failedCount}`);
-  console.log(`Total dfTokens transferred: ${totalTransferred}`);
+  console.log(`Total dfTokens expected: ${totalExpected}`);
+  console.log(`Total dfTokens actual delta: ${totalActualDelta}`);
+  if (totalExpected !== totalActualDelta) {
+    console.log(`  Discrepancy: ${totalActualDelta - totalExpected}`);
+  }
   console.log(`Batches executed: ${batches.length}`);
   console.log("");
 
@@ -278,14 +387,18 @@ async function main() {
   console.log("Per-vault statistics:");
   console.log("-".repeat(80));
   for (const vaultId of Object.keys(vaultGroups)) {
-    const vaultTransfers = transferLog.filter((e) => e.vault_id === vaultId);
-    const vaultSuccess = vaultTransfers.filter((e) => e.status === "success");
-    const vaultTotal = vaultSuccess.reduce(
-      (sum, e) => sum + BigInt(e.df_tokens_transferred),
+    const vaultEntries = transferLog.filter((e) => e.vault_id === vaultId);
+    const vaultSuccess = vaultEntries.filter((e) => e.status === "success");
+    const vaultExpected = vaultSuccess.reduce(
+      (sum, e) => sum + BigInt(e.df_tokens_expected),
+      0n
+    );
+    const vaultDelta = vaultSuccess.reduce(
+      (sum, e) => sum + BigInt(e.df_tokens_delta || "0"),
       0n
     );
     console.log(
-      `  ${vaultId}: ${vaultSuccess.length}/${vaultTransfers.length} OK, ${vaultTotal} dfTokens`
+      `  ${vaultId}: ${vaultSuccess.length}/${vaultEntries.length} OK, expected=${vaultExpected}, actual_delta=${vaultDelta}`
     );
   }
   console.log("=".repeat(60));

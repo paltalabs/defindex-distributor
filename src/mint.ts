@@ -14,7 +14,7 @@ const FAUCET_AMOUNT = 25_000_000_000n; // 2,500 tokens (7 decimals) per faucet c
 
 // Types
 interface VaultAnalysis {
-  total_loss: string;
+  amount: string;
   user_count: number;
   users: { address: string; underlying_amount: string }[];
 }
@@ -63,7 +63,7 @@ async function assetNeedsFromAnalysis(
   console.log("Resolving vault assets via RPC...");
   for (const vaultId of vaultIds) {
     const vault = analysis.vaults[vaultId];
-    const totalLoss = BigInt(vault.total_loss);
+    const totalAmount = BigInt(vault.amount);
 
     const assetAddresses = await simulateContractCall(
       vaultId, "get_assets", [], sourcePublicKey
@@ -75,8 +75,8 @@ async function assetNeedsFromAnalysis(
     }
 
     const asset = assetAddresses[0].address;
-    assetNeeds[asset] = (assetNeeds[asset] || 0n) + totalLoss;
-    console.log(`  ${vaultId.substring(0, 8)}... → ${asset.substring(0, 8)}... needs ${totalLoss}`);
+    assetNeeds[asset] = (assetNeeds[asset] || 0n) + totalAmount;
+    console.log(`  ${vaultId.substring(0, 8)}... → ${asset.substring(0, 8)}... needs ${totalAmount}`);
   }
 
   return assetNeeds;
