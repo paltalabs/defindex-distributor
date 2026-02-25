@@ -123,17 +123,22 @@ MINT_BLEND_TOKENS_URL=               # Optional: Blend faucet URL for demo token
 
 ```bash
 make test
-make build
-stellar contract optimize --wasm target/wasm32v1-none/release/defindex_distributor.wasm
+make build # build and optimize
 stellar keys generate alice --network testnet --fund
 stellar contract deploy \
-  --wasm target/wasm32v1-none/release/defindex_distributor.optimized.wasm \
+  --wasm target/wasm32v1-none/release/defindex_distributor.wasm \
   --source-account alice \
   --network testnet \
   --alias defindex-distributor
 ```
 
 The Contract ID will be stored at `~/.config/stellar/contract-ids/defindex-distributor.json`
+
+Optional: replace the address in src/addresses.ts
+```
+NEW_ADDR=$(cat ~/.config/stellar/contract-ids/defindex-distributor.json | python3 -c "import sys,json; print(json.load(sys.stdin)['ids']['Test SDF Network ; September 2015'])") && \
+sed -i "s/export const DISTRIBUTOR_TESTNET = \".*\"/export const DISTRIBUTOR_TESTNET = \"$NEW_ADDR\"/" src/addresses.ts
+```
 
 ## Project structure
 
