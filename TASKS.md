@@ -40,3 +40,7 @@ events should return more info like underlying assets of minted tokens.
 - [x] Check dfTokens for every user before transaction call
 - [x] Check dfTokens for every user after transaction call
 - [x] Display dfTokens before, after, delta, transaction result, transaction hash, distrubution delta
+
+## Milestone 6
+
+- [ ] Update docs

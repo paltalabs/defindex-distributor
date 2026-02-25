@@ -1,10 +1,105 @@
 # DeFindex Distributor
 
-CLI toolkit for managing value distributions across DeFindex Vaults . Includes a complete pipeline: **deposit total assets into vaults and distribute dfTokens (DeFindex Vault Tokens)** to users. Supports both **mainnet** and **testnet**.
+Smart contract + CLI to distribute dfTokens (DeFindex Vault Tokens) to users in a transparent and secure way.
 
+The Distributor enables fund distribution in **campaigns or events** for DeFindex users: it deposits assets into a vault and distributes the resulting dfTokens to recipients from a CSV, as if each user had deposited directly. The smart contract ensures that each user receives the corresponding amount of dfTokens verifiably on-chain.
 
-## Deploy defindex-distributor contract
+## How it works
+
+1. The script reads a CSV with recipients and amounts per vault
+2. Groups by vault and splits into batches (to respect Soroban's instruction budget)
+3. For each batch, calls the `distribute` contract which in a single transaction:
+   - Deposits the batch total into the vault
+   - Receives minted dfTokens
+   - Distributes them pro-rata to each recipient
+4. Verifies balances before/after and generates a CSV log with the results
+
+## Mainnet Usage
+
+### 1. Setup
+
+```bash
+pnpm i
+cp .env.example .env
 ```
+
+Edit `.env` with mainnet values:
+
+```env
+STELLAR_SECRET_KEY=S...                          # Account with funds to deposit
+SOROBAN_RPC=https://soroban-rpc.mainnet.stellar.gateway.fm  # Mainnet RPC
+HORIZON_RPC=https://horizon.stellar.org
+STELLAR_NETWORK=public
+```
+
+### 2. Prepare the CSV
+
+The CSV must have the columns: `vault`, `asset`, `user`, `amount`
+
+- `vault`: DeFindex vault address
+- `asset`: vault's underlying asset address (token to deposit)
+- `user`: recipient address
+- `amount`: amount in the asset's minimum unit (stroops)
+
+```csv
+vault,asset,user,amount
+CDHZFQZWSU7GSHUBWFEL2FJ7R2RNVHI3RPY5QMCQ3MGJXOSHSTSW5PE7,CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2,GCGI4UWY3JDN2NH4L33Y7GHOGFTV3WTGAPPCQONZJOPOL5BSSCVS6UQI,7952002150
+CDHZFQZWSU7GSHUBWFEL2FJ7R2RNVHI3RPY5QMCQ3MGJXOSHSTSW5PE7,CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2,GCUJW46S35TBIOS2R42LLK4W3O2HRHMQBXGLNSTVTUYCZWN5BML3H7XI,4303465857
+```
+
+### 3. Run the distribution
+
+```bash
+pnpm distribute path/to/file.csv
+```
+
+The script will:
+- Show the status of each batch and vault
+- Compare balances before/after for each user
+- Generate a log at `output/distributor/distributor_<timestamp>.csv`
+
+## Testnet Usage
+
+To test on testnet, first run the demo scripts that create test vaults and users.
+
+### 1. Setup for testnet
+
+```bash
+cp .env.example .env
+```
+
+`.env` comes configured for testnet by default.
+
+### 2. Run the demo
+
+```bash
+STELLAR_NETWORK=testnet pnpm demo
+```
+
+This will:
+- Fund the manager account via Friendbot
+- Mint USDC/XTAR tokens via the Soroswap faucet
+- Deploy 3 test vaults via the DeFindex Factory
+- Create 10 users per vault
+- Generate a test CSV at `output/demo/demo_testnet_<timestamp>.csv`
+
+### 3. Mint tokens if needed
+
+If the manager account doesn't have enough funds for the deposits:
+
+```bash
+STELLAR_NETWORK=testnet pnpm mint output/demo/demo_testnet_<timestamp>.csv
+```
+
+### 4. Distribute
+
+```bash
+STELLAR_NETWORK=testnet pnpm distribute output/demo/demo_testnet_<timestamp>.csv
+```
+
+## Deploying the Distributor contract
+
+```bash
 make test
 make build
 stellar keys generate alice --network testnet --fund
@@ -14,194 +109,30 @@ stellar contract deploy \
   --network testnet \
   --alias defindex-distributor
 ```
-Contract ID will be in `~/.config/stellar/contract-ids/defindex-distributor.json`
 
-## Setup
+The Contract ID will be stored at `~/.config/stellar/contract-ids/defindex-distributor.json`
 
-1. Install dependencies:
+## Project structure
 
-   ```bash
-   pnpm i
-   ```
-
-2. Copy and configure environment variables:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   Key variables:
-
-   ```env
-   STELLAR_NETWORK=testnet          # "testnet" or "public" (default: public)
-   SOROBAN_RPC=https://soroban-testnet.stellar.org
-   HORIZON_RPC=https://horizon-testnet.stellar.org
-   STELLAR_SECRET_KEY=S...          # Account holding funds for deposits/transfers
-
-## Distribution Pipeline
-
-To distribute funds to users through DeFindex Vaults.
-
-### Step 1: Analyze
-
-```bash
-pnpm analyze "defindex_funds_to_distribute.csv"
 ```
-
-**Input CSV columns:** `asset`, `vault`, `user`, `amount`
-Note: Amounts should be in the vault underlying asset (asset), and in the minimum asset unit (like stroops for XLM)
-
-Example:
-
-```csv
-asset,vault,user,amount
-CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2,CDHZFQZWSU7GSHUBWFEL2FJ7R2RNVHI3RPY5QMCQ3MGJXOSHSTSW5PE7,GCGI4UWY3JDN2NH4L33Y7GHOGFTV3WTGAPPCQONZJOPOL5BSSCVS6UQI,7952002150
-CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2,CDHZFQZWSU7GSHUBWFEL2FJ7R2RNVHI3RPY5QMCQ3MGJXOSHSTSW5PE7,GCUJW46S35TBIOS2R42LLK4W3O2HRHMQBXGLNSTVTUYCZWN5BML3H7XI,4303465857
-CB3TLW74NBIOT3BUWOZ3TUM6RFDF6A4GVIRUQRQZABG5KPOUL4JJOV2F,CD237PTITFIAS752WB3D4DFQY3FVLCGHBZMVQN7LNOYNZME7TVZLG52N,GBE467YLF5SHGJ4ANZSHSVBOE5E5HWKZGFNVSVHEI26UAH6YCBTOCE6S,7467554674
-CB3TLW74NBIOT3BUWOZ3TUM6RFDF6A4GVIRUQRQZABG5KPOUL4JJOV2F,CD237PTITFIAS752WB3D4DFQY3FVLCGHBZMVQN7LNOYNZME7TVZLG52N,GAQQS2PKUUURN4BYCZ5CVYMCSY47UXZEAYJXWOWHOSRHHN7H5B5KTI7T,4925972025
-CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2,CD3UK4W7LFIFLTTTNZEEMGPJNQRZZGA4SHCAWJEXFRFO65EC6NRLOYBA,GD2MH7N2A7NSW7SMKVYEKN5SFOTLER7MXNXCCRYP6RJIUSHIV4BKCJER,9712903229
-CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2,CD3UK4W7LFIFLTTTNZEEMGPJNQRZZGA4SHCAWJEXFRFO65EC6NRLOYBA,GDYAQ7CAIKDHAXLBWXP7TGIPPR3NE3JMPWASTYFXO7MXKOUOKFD2PEEX,5982203100
-```
-
-### Step 2: Deposit
-
-```bash
-pnpm deposit output/analysis/analysis_<timestamp>.json
-```
-
-For each vault:
-
-1. Queries `get_assets()` to identify the underlying token
-2. Verifies the source account has sufficient balance
-3. Executes `deposit()` with the total loss amount
-4. Measures dfTokens minted (balance diff before/after)
-5. Extracts dfTokens minted from response
-6. Calculates per-user allocation: `dfTokens_user = (user_amount * dfTokens_minted) / total_amount_to_distribute`
-
-### Step 3: Distribute
-
-```bash
-pnpm distribute output/deposits/distribution_<ts>.csv
-```
-
-- Verifies dfToken balances per vault before starting
-- Batches 10 transfers per transaction
-- Continues on batch failure, shows per-vault statistics at the end
-
-## Testnet Demo Flow
-
-End-to-end demo that deploys vaults, creates test users, and runs the full distribution pipeline on testnet.
-
-### 1. Deploy vaults and generate test data
-
-```bash
-pnpm demo
-```
-
-Step 3: Creating 10 users per vault...
-  Vault CCZN6MFG... (XTAR):
-    Funded 5/10 users (+ XTAR minted)
-    Funded 10/10 users (+ XTAR minted)
-Here users just need to be funded by Friendbot. XTAR doesnt need to be minted
-
-- Deploys 3 vaults (alternating XTAR/USDC) via the DeFindex Factory
-- Creates 10 users per vault, funded via friendbot
-- Mints USDC/XTAR for the manager and users via [Soroswap faucet](https://api.soroswap.finance/api/faucet)
-- Generates a CSV with simulated loss data
-
-**Output:** `output/demo/demo_testnet_<timestamp>.csv`
-TODO: script should say CSV written to: output/demo/demo_testnet_2026-02-24T12-34-48-153Z.csv
-
-### 2. Analyze the demo CSV and generate JSON
-
-```bash
-pnpm analyze output/demo/demo_testnet_<timestamp>.csv
-```
-
-- Auto-detects the CSV format
-- Groups records by vault and computes total amounts to be distributed per vault
-
-**Output:** `output/analysis/analysis_<timestamp>.json`
-
-### 3. Optional: Mint test tokens to cover deposits
-
-This is necesary only when the manager account doesn't have enough funds in testnet to cover all the deposits. In mainnet you will never need this
-
-```bash
-pnpm mint output/demo/demo_testnet_<timestamp>.csv
-```
-
-- Accepts either a demo CSV (reads asset column directly) or an analysis JSON
-- Checks current balances per asset, calculates deficit
-- Calls the Soroswap faucet repeatedly (2,500 tokens per call) until covered
-
-### 4. Deposit funds into vaults
-
-```bash
-pnpm deposit output/analysis/analysis_<timestamp>.json
-```
-
-- For each vault: deposits the total  amount and gets minted dfTokens
-- Calculates proportional per-user dfToken allocation: `dfTokens_user = (user_amount * dfTokens_minted) / total_amount`
-- **Remainder (dust):** since this is integer division, each user's allocation is truncated. The sum of all allocations may be slightly less than the total minted. This difference (typically a few stroops) is the "dust" and remains in the manager's account.
-
-**Outputs:**
-
-- `output/deposits/deposit_log_<ts>.csv`
-- `output/deposits/distribution_<ts>.csv`
-
-### 5. Distribute dfTokens to users
-
-```bash
-pnpm distribute output/deposits/distribution_<ts>.csv
-```
-
-- Batch-transfers dfTokens to all users (10 per transaction)
-- Continues on batch failure, logs results
-
-**Output:** `output/distributions/distributor_<ts>_log.csv`
-
-## Other Scripts
-
-| Command                     | Description                                                  |
-|-----------------------------|--------------------------------------------------------------|
-| `pnpm transfer <csv>`       | Legacy single-vault dfToken transfer (CSV: `address,amount`) |
-| `pnpm send <amount> <dest>` | Send XLM to a destination address                            |
-| `pnpm merge:secret`         | Merge account via `MERGE_SECRET` env var                     |
-| `pnpm merge:mnemonic`       | Merge account via `MNEMONIC` env var (BIP39)                 |
-
-## Project Structure
-
-```md
 src/
-├── utils.ts                # Shared types, network config, Stellar/router utilities
-├── analyze.ts              # CSV analysis (supports demo + lost funds formats)
-├── deposit.ts              # Vault deposits + distribution calculation
-├── distribute.ts           # Batch dfToken transfers
-├── demo.ts                 # Testnet demo: deploy vaults, create users, generate CSV
-├── mint.ts                 # Testnet token minter via Soroswap faucet
-├── index.ts                # Legacy single-vault transfer
-├── send.ts                 # XLM send utility
-├── mergeAccountMnemonic.ts
-└── mergeAccountSecret.ts
+├── utils.ts            # Network config, Stellar SDK helpers
+├── useDistributor.ts   # Main script: deposit + distribute via contract
+├── demo.ts             # Testnet demo: deploy vaults, create users, generate CSV
+└── mint.ts             # Mint testnet tokens via Soroswap faucet
 
-output/                     # All script outputs (gitignored)
-├── demo/                   # demo_testnet_*.csv
-├── analysis/               # analysis_*.json
-├── deposits/               # deposit_log_*.csv, distribution_*.csv
-└── distributions/          # distributor_*_log.csv
+contracts/
+└── defindex-distributor/  # Soroban smart contract (Rust)
+
+output/                 # Script outputs (gitignored)
+├── demo/               # demo_testnet_*.csv
+└── distributor/        # distributor_*.csv (distribution logs)
 ```
 
-## All Scripts
+## Scripts
 
-| Command                     | Description                                            |
-|-----------------------------|--------------------------------------------------------|
-| `pnpm demo`                 | Deploy testnet vaults, create users, generate demo CSV |
-| `pnpm mint <csv\|json>`     | Mint testnet tokens via Soroswap faucet                |
-| `pnpm analyze <csv>`        | Analyze lost funds / demo CSV                          |
-| `pnpm deposit <json>`       | Deposit into vaults, generate distribution CSV         |
-| `pnpm distribute <csv>`     | Batch-transfer dfTokens to users                       |
-| `pnpm transfer <csv>`       | Legacy single-vault transfer                           |
-| `pnpm send <amount> <dest>` | Send XLM                                               |
-| `pnpm merge:secret`         | Merge account via secret key                           |
-| `pnpm merge:mnemonic`       | Merge account via mnemonic                             |
+| Command | Description |
+|---|---|
+| `pnpm demo` | Deploy testnet vaults, create users, generate test CSV |
+| `pnpm mint <csv>` | Mint testnet tokens via Soroswap faucet |
+| `pnpm distribute <csv>` | Distribute dfTokens to users |
