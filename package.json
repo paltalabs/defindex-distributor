@@ -5,16 +5,9 @@
   "author": "coderipper",
   "license": "MIT",
   "scripts": {
-    "transfer": "tsx src/index.ts",
-    "analyze": "tsx src/analyze.ts",
-    "deposit": "tsx src/deposit.ts",
-    "distribute": "tsx src/distribute.ts",
-    "merge:mnemonic": "tsx src/mergeAccountMnemonic.ts",
-    "merge:secret": "tsx src/mergeAccountSecret.ts",
-    "send": "tsx src/send.ts",
     "demo": "tsx src/demo.ts",
-    "mint": "tsx src/mint.ts",
-    "use-distributor": "tsx src/useDistributor.ts"
+    "distribute": "tsx src/useDistributor.ts",
+    "mint": "tsx src/mint.ts"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.4.3",
