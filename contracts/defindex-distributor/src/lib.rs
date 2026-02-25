@@ -3,6 +3,11 @@ use soroban_fixed_point_math::SorobanFixedPoint;
 use soroban_sdk::{
     contract, contractimpl, contracttype, token::TokenClient, vec, Address, Env, Map, Vec,
 };
+use soroban_sdk::auth::InvokerContractAuthEntry;
+use soroban_sdk::auth::SubContractInvocation;
+use soroban_sdk::auth::ContractContext;
+use soroban_sdk::Symbol;
+use soroban_sdk::IntoVal;
 
 // Generated client for the defindex vault (deposit + SAC df token interface).
 // The WASM is a pre-built external binary; Cargo dependency tracking and the
@@ -96,6 +101,13 @@ impl Distributor {
             &true,            // invest immediately
         );
 
+        // Caller sends all the dftokens to the distributor contract
+        let df_token = TokenClient::new(&e, &vault);
+        df_token.transfer(&caller, &e.current_contract_address(), &df_tokens_minted);
+        // From now on, all subsequent txs should be done by the distributor contract, not by the caller
+        // This contract should generate the authorizations to transfer the df tokens to the recipients
+        
+
         // ── 3. Get the authoritative price per share from the vault ───────────
         // Ask the vault how much underlying `df_tokens_minted` shares are worth.
         // This uses the vault's own exchange-rate calculation (post-deposit state)
@@ -108,7 +120,6 @@ impl Distributor {
 
         // ── 4. Distribute df tokens from caller to each recipient ─────────────
         // The vault contract IS the df token (implements SAC).
-        let df_token = TokenClient::new(&e, &vault);
 
         let mut distributed: i128 = 0;
         let mut results: Vec<(Address, i128)> = vec![&e];
@@ -131,8 +142,42 @@ impl Distributor {
                 // valuation of the total minted shares.
                 r.amount.fixed_div_floor(&e, &underlying_for_minted, &df_tokens_minted)
             };
-
-            df_token.transfer(&caller, &r.address, &user_df);
+            // this contract should generate the authorizations to transfer the df tokens to the recipients
+            // e.authorize_as_current_contract(vec![
+            //     &e,
+            //     InvokerContractAuthEntry::Contract(SubContractInvocation {
+            //         context: ContractContext {
+            //             contract: config.asset.clone(),
+            //             fn_name: Symbol::new(&e, "transfer"),
+            //             args: (
+            //                 e.current_contract_address(),
+            //                 config.pool.clone(),
+            //                 amount.clone(),
+            //             )
+            //                 .into_val(e),
+            //         },
+            //         sub_invocations: vec![&e],
+            //     }),
+            // ]);
+            // df token transfers should be done by the distributor contract (THIS)
+            // this contract should generate the authorizations to transfer the df tokens to the recipients
+            e.authorize_as_current_contract(vec![
+                &e,
+                InvokerContractAuthEntry::Contract(SubContractInvocation {
+                    context: ContractContext {
+                        contract: vault.clone(),
+                        fn_name: Symbol::new(&e, "transfer"),
+                        args: (
+                            e.current_contract_address(),
+                            r.address.clone(),
+                            user_df.clone(),
+                        )
+                            .into_val(&e),
+                    },
+                    sub_invocations: vec![&e],
+                }),
+            ]);
+            df_token.transfer(&e.current_contract_address(), &r.address, &user_df);
             distributed = match distributed.checked_add(user_df) {
                 Some(v) => v,
                 None => panic!("distributed overflow"),
