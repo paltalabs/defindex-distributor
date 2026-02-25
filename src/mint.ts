@@ -159,19 +159,32 @@ async function mintXLMViaFriendbot(
   
   The API is protected by a secret URL that is only used in this demo script, so it cannot be used by external users.
 */
-async function mintBlendTokens(address:string): Promise<void> {
+async function mintBlendTokens(keypair: Keypair): Promise<void> {
   const mintUrl = process.env.MINT_BLEND_TOKENS_URL;
   if (!mintUrl) {
     console.warn("MINT_BLEND_TOKENS_URL not set, skipping blend token minting");
     return;
   }
 
+  const address = keypair.publicKey();
   const url = `${mintUrl}getAssets?userId=${address}`;
   const response = await fetch(url, { method: "GET" });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`Minting blend tokens failed for ${address}: ${text}`);
   }
+
+  const xdrString = await response.text();
+  if (!xdrString || xdrString.trim().length === 0) {
+    throw new Error(`Blend faucet returned empty response for ${address}`);
+  }
+
+  const parsed = TransactionBuilder.fromXDR(xdrString.trim(), getNetworkPassphrase());
+  if (parsed instanceof StellarSdk.FeeBumpTransaction) {
+    throw new Error("FeeBumpTransaction not supported");
+  }
+  parsed.sign(keypair);
+  await sendTransaction(parsed);
 }
 
 async function buildAndSendSorobanTx(
@@ -221,7 +234,7 @@ async function mintBlendViaEphemeralAccounts(
       await fundWithFriendbot(tempPublicKey);
 
       process.stdout.write(" minting...");
-      await mintBlendTokens(tempPublicKey);
+      await mintBlendTokens(tempKeypair);
 
       const balance = await getTokenBalance(tokenAddress, tempPublicKey);
       if (balance <= 0n) {

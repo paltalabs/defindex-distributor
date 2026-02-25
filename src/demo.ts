@@ -64,18 +64,31 @@ async function fundWithFriendbot(publicKey: string): Promise<void> {
   }
 }
 
-async function mintBlendTokensRaw(address: string): Promise<void> {
+async function mintBlendTokens(keypair: Keypair): Promise<void> {
   const mintUrl = process.env.MINT_BLEND_TOKENS_URL;
   if (!mintUrl) {
     throw new Error("MINT_BLEND_TOKENS_URL not set. Required to mint Blend USDC for vault seed deposits.");
   }
 
+  const address = keypair.publicKey();
   const url = `${mintUrl}getAssets?userId=${address}`;
-  const response = await fetch(url, { method: "POST" });
+  const response = await fetch(url, { method: "GET" });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`Minting blend tokens failed for ${address}: ${text}`);
   }
+
+  const xdrString = await response.text();
+  if (!xdrString || xdrString.trim().length === 0) {
+    throw new Error(`Blend faucet returned empty response for ${address}`);
+  }
+
+  const parsed = TransactionBuilder.fromXDR(xdrString.trim(), getNetworkPassphrase());
+  if (parsed instanceof StellarSdk.FeeBumpTransaction) {
+    throw new Error("FeeBumpTransaction not supported");
+  }
+  parsed.sign(keypair);
+  await sendTransaction(parsed);
 }
 
 async function getTokenBalance(tokenContract: string, publicKey: string): Promise<bigint> {
@@ -118,30 +131,18 @@ async function buildAndSendSorobanTx(
 }
 
 async function mintBlendToManager(
-  managerPublicKey: string,
-  tokenAddress: string
+  managerKeypair: Keypair,
+tokenAddress: string
 ): Promise<void> {
-  const tempKeypair = Keypair.random();
-  const tempPublicKey = tempKeypair.publicKey();
+  console.log(`  Minting blend to manager.`);
+  await mintBlendTokens(managerKeypair);
 
-  console.log(`  Creating ephemeral account for Blend mint...`);
-  await fundWithFriendbot(tempPublicKey);
-  await mintBlendTokensRaw(tempPublicKey);
-
-  const balance = await getTokenBalance(tokenAddress, tempPublicKey);
+  const managerPublicKey = managerKeypair.publicKey();
+  const balance = await getTokenBalance(tokenAddress, managerPublicKey);
   if (balance <= 0n) {
     throw new Error("Ephemeral account received no tokens from Blend faucet");
   }
 
-  console.log(`  Transferring ${Number(balance) / 1e7} tokens to manager...`);
-  const tokenContract = new Contract(tokenAddress);
-  const transferOp = tokenContract.call(
-    "transfer",
-    new Address(tempPublicKey).toScVal(),
-    new Address(managerPublicKey).toScVal(),
-    nativeToScVal(balance, { type: "i128" })
-  );
-  await buildAndSendSorobanTx(tempKeypair, transferOp);
 }
 
 async function fetchTestnetContracts(): Promise<TestnetContracts> {
@@ -267,7 +268,7 @@ async function main() {
     if (balance < seedNeeded) {
       console.log(`  Need at least ${Number(seedNeeded) / 1e7} tokens for seed deposit. Minting via Blend faucet...`);
       try {
-        await mintBlendToManager(managerPublicKey, contract);
+        await mintBlendToManager(managerKeypair, contract);
         const bal = await simulateContractCall(
           contract, "balance",
           [new Address(managerPublicKey).toScVal()],
