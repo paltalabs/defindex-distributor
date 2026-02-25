@@ -20,9 +20,9 @@ The first version of the distributor contract will only send the assets to the u
 
 ## Milestone 2: Script should work with micro mvp contract
 
-- [ ] script should take address of distributor contract
-- [ ] script should take csv and execute batch of transactions
-- [ ] script should work with distributor contract
+- [x] script should take address of distributor contract
+- [x] script should take csv and execute batch of transactions
+- [x] script should work with distributor contract
 
 ## Milestone 3: Add Defindex interactions
 
@@ -41,6 +41,18 @@ events should return more info like underlying assets of minted tokens.
 - [x] Check dfTokens for every user after transaction call
 - [x] Display dfTokens before, after, delta, transaction result, transaction hash, distrubution delta
 
-## Milestone 6
+## Milestone 6: Execution script refinement
 
-- [ ] Update docs
+- [x] Update scripts to work with new .env config
+- [z] Create logger service:
+      - Should create a timestamp named .log and .csv file
+      - Sould update line by line so in case of failure we get all the executed info
+- [x] Update demo script to create defindex vaults with blend strategies on testnet:
+      - [ ] get strategies from [defindex repo](https://raw.githubusercontent.com/paltalabs/defindex/refs/heads/main/public/testnet.contracts.json)
+      - [ ] we should deposit and rebalance (can use [defindex api](https://api.defindex.io/docs#tag/Factory/operation/FactoryController_createVaultAutoInvest))
+      - [ ] Based on the created data determine if mint is needed, if its, auto run mint
+- [x] Update mint script:
+      - [ ] support xlm (we can create random keypairs, fund, transfer 98.5% of funds to manager)
+- [x] Update docs:
+      - Add prerequisites
+      - Review ortography and sintaxis errors
