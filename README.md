@@ -4,6 +4,8 @@ Smart contract + CLI to distribute dfTokens (DeFindex Vault Tokens) to users in 
 
 The Distributor enables fund distribution in **campaigns or events** for DeFindex users: it deposits assets into a vault and distributes the resulting dfTokens to recipients from a CSV, as if each user had deposited directly. The smart contract ensures that each user receives the corresponding amount of dfTokens verifiably on-chain.
 
+TODO: csv has amounts in underlying asset
+
 ## How it works
 
 1. The script reads a CSV with recipients and amounts per vault
@@ -14,6 +16,7 @@ The Distributor enables fund distribution in **campaigns or events** for DeFinde
    - Distributes them pro-rata to each recipient
 4. Verifies balances before/after and generates a CSV log with the results
 
+TODO: agregar prerequisitos
 ## Mainnet Usage
 
 ### 1. Setup
