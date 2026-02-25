@@ -17,6 +17,7 @@ config();
 
 // ── Constants ──
 const DISTRIBUTOR_TESTNET = "CA6LUTIXZN4GYUOQN6EGNQS3WLSMMIRQKEGI36EFK725AEKXQPI6G3VY";
+const DISTRIBUTOR_MAINNET = "CD5Q6Z3..."  //Waiting for the actual development of the mainnet version of the contract to be deployed and verified before adding the address here.
 
 // ── Types ──
 interface CsvRecord {

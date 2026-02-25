@@ -2,7 +2,6 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { Address, xdr, Keypair, Contract, TransactionBuilder, rpc, nativeToScVal } from "@stellar/stellar-sdk";
 import { config } from "dotenv";
 import * as fs from "fs";
-import * as path from "path";
 import {
   getNetwork,
   getNetworkPassphrase,
@@ -264,8 +263,51 @@ async function main() {
   }
   console.log("");
 
-  // Step 3: Create and fund users
-  console.log(`Step 3: Creating ${USERS_PER_VAULT} users per vault...`);
+  // Step 3: Seed vaults with initial deposit (avoids min liquidity fee on distribute)
+  const SEED_AMOUNT = 2000n;
+  console.log("Step 3: Seeding vaults with initial deposit...");
+
+  for (const vault of vaults) {
+    let totalSupply = 0n;
+    try {
+      const result = await simulateContractCall(
+        vault.address, "total_supply", [], managerPublicKey
+      );
+      totalSupply = BigInt(result as string | number);
+    } catch {
+      // No supply yet
+    }
+
+    if (totalSupply > 0n) {
+      console.log(`  ${vault.address.substring(0, 8)}... (${vault.assetName}) already has supply: ${totalSupply} — skipping`);
+      continue;
+    }
+
+    console.log(`  ${vault.address.substring(0, 8)}... (${vault.assetName}) is empty — depositing ${SEED_AMOUNT}...`);
+    try {
+      const vaultContract = new Contract(vault.address);
+      const amountScVal = nativeToScVal(SEED_AMOUNT, { type: "i128" });
+
+      const operation = vaultContract.call(
+        "deposit",
+        xdr.ScVal.scvVec([amountScVal]),  // amounts_desired
+        xdr.ScVal.scvVec([amountScVal]),  // amounts_min
+        new Address(managerPublicKey).toScVal(),  // from
+        xdr.ScVal.scvBool(false)  // invest
+      );
+
+      const txHash = await buildAndSendTx(managerKeypair, operation);
+      console.log(`    Seed deposit confirmed: ${txHash}`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`    Seed deposit FAILED: ${msg}`);
+      console.warn("    Distribute may fail for this vault due to min liquidity fee.");
+    }
+  }
+  console.log("");
+
+  // Step 4: Create and fund users
+  console.log(`Step 4: Creating ${USERS_PER_VAULT} users per vault...`);
   const usersByVault: Record<string, { publicKey: string; keypair: Keypair }[]> = {};
 
   for (const vault of vaults) {
@@ -287,8 +329,8 @@ async function main() {
   }
   console.log("");
 
-  // Step 4: Generate simulated data
-  console.log("Step 4: Generating simulated data...");
+  // Step 5: Generate simulated data
+  console.log("Step 5: Generating simulated data...");
   const csvRows: string[] = ["vault,asset,user,amount"];
 
   for (const vault of vaults) {
@@ -300,7 +342,7 @@ async function main() {
     }
   }
 
-  // Step 5: Save CSV
+  // Step 6: Save CSV
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const csvFilename = `demo_testnet_${timestamp}.csv`;
   const csvPath = getOutputPath("demo", csvFilename);
@@ -318,9 +360,7 @@ async function main() {
   }
   console.log("");
   console.log("Next steps:");
-  console.log(`  1. pnpm analyze output/demo/${csvFilename}`);
-  console.log(`  2. pnpm deposit output/demo/${csvFilename}.json`);
-  console.log(`  3. pnpm distribute output/deposit/${csvFilename}distribution.csv`);
+  console.log(`  run: pnpm distribute output/demo/${csvFilename}`);
   console.log("=".repeat(60));
 }
 
