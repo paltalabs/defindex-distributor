@@ -6,7 +6,7 @@
   "license": "MIT",
   "scripts": {
     "demo": "tsx src/demo.ts",
-    "distribute": "tsx src/useDistributor.ts",
+    "distribute": "tsx src/distribute.ts",
     "mint": "tsx src/mint.ts"
   },
   "dependencies": {

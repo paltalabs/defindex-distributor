@@ -1,31 +1,53 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { Address, xdr, Keypair, Contract, TransactionBuilder, rpc, nativeToScVal } from "@stellar/stellar-sdk";
+import { Address, Keypair, TransactionBuilder, Contract, rpc, nativeToScVal } from "@stellar/stellar-sdk";
 import { config } from "dotenv";
 import * as fs from "fs";
+import { execSync } from "child_process";
 import {
   getNetwork,
   getNetworkPassphrase,
   getNetworkConfig,
-  rpcServer,
+  getEnvVar,
+  getRpcServer,
   sendTransaction,
   simulateContractCall,
   getOutputPath,
 } from "./utils";
+import { DEFINDEX_API_URL, TESTNET_CONTRACTS_URL, TESTNET_BLEND_USDC, TESTNET_XLM } from "./addresses";
 
 config();
 
 // ── Testnet Constants ──
-const NUM_VAULTS = 3;
 const USERS_PER_VAULT = 10;
 
-// Soroswap testnet tokens
-const TESTNET_XLM = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
-const TESTNET_USDC = "CB3TLW74NBIOT3BUWOZ3TUM6RFDF6A4GVIRUQRQZABG5KPOUL4JJOV2F";
-const TESTNET_XTAR = "CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2";
+// Seed deposit amount (in stroops, 7 decimals) — small amount to initialize vault
+const SEED_AMOUNT = 100_0000000; // 100 tokens
 
-// DeFindex testnet
-const DEFINDEX_FACTORY = "CDSCWE4GLNBYYTES2OCYDFQA2LLY4RBIAX6ZI32VSUXD7GO6HRPO4A32";
-const SOROSWAP_ROUTER = "CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH";
+// ── Types ──
+interface TestnetContracts {
+  ids: {
+    USDC_blend_strategy: string;
+    XLM_blend_strategy: string;
+    defindex_factory: string;
+    [key: string]: string;
+  };
+  hashes: Record<string, string>;
+}
+
+interface VaultConfig {
+  name: string;
+  symbol: string;
+  assetAddress: string;
+  assetSymbol: string;
+  strategyAddress: string;
+  strategyName: string;
+}
+
+interface CreateVaultResponse {
+  xdr: string;
+  predictedVaultAddress: string;
+  warning?: string;
+}
 
 // ── Helpers ──
 
@@ -37,30 +59,44 @@ async function fundWithFriendbot(publicKey: string): Promise<void> {
   const response = await fetch(url);
   if (!response.ok) {
     const text = await response.text();
-    // Already funded is OK
     if (text.includes("createAccountAlreadyExist") || text.includes("already funded")) return;
     throw new Error(`Friendbot failed for ${publicKey}: ${text}`);
   }
 }
 
-async function mintSoroswapToken(address: string, tokenContract: string): Promise<void> {
-  const { soroswapFaucetUrl } = getNetworkConfig();
-  if (!soroswapFaucetUrl) throw new Error("Soroswap faucet not available on this network");
+async function mintBlendTokensRaw(address: string): Promise<void> {
+  const mintUrl = process.env.MINT_BLEND_TOKENS_URL;
+  if (!mintUrl) {
+    throw new Error("MINT_BLEND_TOKENS_URL not set. Required to mint Blend USDC for vault seed deposits.");
+  }
 
-  const url = `${soroswapFaucetUrl}?address=${address}&contract=${tokenContract}`;
+  const url = `${mintUrl}getAssets?userId=${address}`;
   const response = await fetch(url, { method: "POST" });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Soroswap faucet failed for ${address}: ${text}`);
+    throw new Error(`Minting blend tokens failed for ${address}: ${text}`);
   }
 }
 
-async function buildAndSendTx(
+async function getTokenBalance(tokenContract: string, publicKey: string): Promise<bigint> {
+  try {
+    const result = await simulateContractCall(
+      tokenContract, "balance",
+      [new Address(publicKey).toScVal()],
+      publicKey
+    );
+    return BigInt(result as string | number);
+  } catch {
+    return 0n;
+  }
+}
+
+async function buildAndSendSorobanTx(
   sourceKeypair: Keypair,
   operation: StellarSdk.xdr.Operation
 ): Promise<string> {
   const sourcePublicKey = sourceKeypair.publicKey();
-  const account = await rpcServer.getAccount(sourcePublicKey);
+  const account = await getRpcServer().getAccount(sourcePublicKey);
 
   const txBuilder = new TransactionBuilder(account, {
     fee: "2000",
@@ -71,90 +107,110 @@ async function buildAndSendTx(
   txBuilder.setTimeout(300);
   const tx = txBuilder.build();
 
-  const simulation = await rpcServer.simulateTransaction(tx);
+  const simulation = await getRpcServer().simulateTransaction(tx);
   if (rpc.Api.isSimulationError(simulation)) {
     throw new Error(`Simulation failed: ${simulation.error}`);
   }
 
   const preparedTx = rpc.assembleTransaction(tx, simulation).build();
   preparedTx.sign(sourceKeypair);
-
   return sendTransaction(preparedTx);
 }
 
-// ── Factory: create_defindex_vault ──
+async function mintBlendToManager(
+  managerPublicKey: string,
+  tokenAddress: string
+): Promise<void> {
+  const tempKeypair = Keypair.random();
+  const tempPublicKey = tempKeypair.publicKey();
 
-function buildCreateVaultOperation(
-  managerAddress: string,
-  assetAddress: string,
-  factoryContract: Contract
-): StellarSdk.xdr.Operation {
-  // roles: Map<u32, Address> — 0=EmergencyManager, 1=FeeReceiver, 2=Manager, 3=RebalanceManager
-  const rolesMap = xdr.ScVal.scvMap([
-    new xdr.ScMapEntry({
-      key: nativeToScVal(0, { type: "u32" }),
-      val: new Address(managerAddress).toScVal(),
-    }),
-    new xdr.ScMapEntry({
-      key: nativeToScVal(1, { type: "u32" }),
-      val: new Address(managerAddress).toScVal(),
-    }),
-    new xdr.ScMapEntry({
-      key: nativeToScVal(2, { type: "u32" }),
-      val: new Address(managerAddress).toScVal(),
-    }),
-    new xdr.ScMapEntry({
-      key: nativeToScVal(3, { type: "u32" }),
-      val: new Address(managerAddress).toScVal(),
-    }),
-  ]);
+  console.log(`  Creating ephemeral account for Blend mint...`);
+  await fundWithFriendbot(tempPublicKey);
+  await mintBlendTokensRaw(tempPublicKey);
 
-  // vault_fee: u32 (0 basis points)
-  const vaultFee = nativeToScVal(0, { type: "u32" });
+  const balance = await getTokenBalance(tokenAddress, tempPublicKey);
+  if (balance <= 0n) {
+    throw new Error("Ephemeral account received no tokens from Blend faucet");
+  }
 
-  // assets: Vec<AssetStrategySet>
-  // Each AssetStrategySet = { address: Address, strategies: Vec<Strategy> }
-  const assets = xdr.ScVal.scvVec([
-    xdr.ScVal.scvMap([
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("address"),
-        val: new Address(assetAddress).toScVal(),
-      }),
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("strategies"),
-        val: xdr.ScVal.scvVec([]),
-      }),
-    ]),
-  ]);
-
-  // soroswap_router
-  const router = new Address(SOROSWAP_ROUTER).toScVal();
-
-  // name_symbol: Map<String, String>
-  const assetName = assetAddress === TESTNET_USDC ? "USDC" : assetAddress === TESTNET_XTAR ? "XTAR" : "XLM";
-  const nameSymbol = xdr.ScVal.scvMap([
-    new xdr.ScMapEntry({
-      key: xdr.ScVal.scvString("name"),
-      val: xdr.ScVal.scvString(`Demo ${assetName} Vault`),
-    }),
-    new xdr.ScMapEntry({
-      key: xdr.ScVal.scvString("symbol"),
-      val: xdr.ScVal.scvString(`df${assetName}`),
-    }),
-  ]);
-
-  // upgradable: bool
-  const upgradable = xdr.ScVal.scvBool(false);
-
-  return factoryContract.call(
-    "create_defindex_vault",
-    rolesMap,
-    vaultFee,
-    assets,
-    router,
-    nameSymbol,
-    upgradable
+  console.log(`  Transferring ${Number(balance) / 1e7} tokens to manager...`);
+  const tokenContract = new Contract(tokenAddress);
+  const transferOp = tokenContract.call(
+    "transfer",
+    new Address(tempPublicKey).toScVal(),
+    new Address(managerPublicKey).toScVal(),
+    nativeToScVal(balance, { type: "i128" })
   );
+  await buildAndSendSorobanTx(tempKeypair, transferOp);
+}
+
+async function fetchTestnetContracts(): Promise<TestnetContracts> {
+  const response = await fetch(TESTNET_CONTRACTS_URL);
+  if (!response.ok) throw new Error(`Failed to fetch testnet contracts: ${response.statusText}`);
+  return response.json() as Promise<TestnetContracts>;
+}
+
+async function createVaultViaAPI(
+  managerPublicKey: string,
+  vaultConfig: VaultConfig,
+  network: string
+): Promise<CreateVaultResponse> {
+  const apiKey = process.env.DEFINDEX_API_KEY || "";
+  const url = `${DEFINDEX_API_URL}/factory/create-vault-auto-invest?network=${network}`;
+
+  const body = {
+    caller: managerPublicKey,
+    roles: {
+      emergencyManager: managerPublicKey,
+      rebalanceManager: managerPublicKey,
+      feeReceiver: managerPublicKey,
+      manager: managerPublicKey,
+    },
+    name: vaultConfig.name,
+    symbol: vaultConfig.symbol,
+    vaultFee: 0,
+    upgradable: false,
+    assets: [
+      {
+        address: vaultConfig.assetAddress,
+        symbol: vaultConfig.assetSymbol,
+        amount: SEED_AMOUNT,
+        strategies: [
+          {
+            address: vaultConfig.strategyAddress,
+            name: vaultConfig.strategyName,
+            amount: SEED_AMOUNT,
+          },
+        ],
+      },
+    ],
+  };
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${apiKey}`,
+  };
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`DeFindex API error (${response.status}): ${text}`);
+  }
+
+  return response.json() as Promise<CreateVaultResponse>;
+}
+
+async function signAndSendXdr(xdrString: string, keypair: Keypair): Promise<string> {
+  const parsed = TransactionBuilder.fromXDR(xdrString, getNetworkPassphrase());
+  if (parsed instanceof StellarSdk.FeeBumpTransaction) {
+    throw new Error("FeeBumpTransaction not supported");
+  }
+  parsed.sign(keypair);
+  return sendTransaction(parsed);
 }
 
 // ── Main ──
@@ -165,9 +221,7 @@ async function main() {
     process.exit(1);
   }
 
-  const secretKey = process.env.STELLAR_SECRET_KEY;
-  if (!secretKey) throw new Error("STELLAR_SECRET_KEY environment variable is required");
-  if (!process.env.SOROBAN_RPC) throw new Error("SOROBAN_RPC environment variable is required");
+  const secretKey = getEnvVar("STELLAR_SECRET_KEY");
 
   const managerKeypair = Keypair.fromSecret(secretKey);
   const managerPublicKey = managerKeypair.publicKey();
@@ -177,11 +231,10 @@ async function main() {
   console.log("=".repeat(60));
   console.log(`Manager: ${managerPublicKey}`);
   console.log(`Network: testnet`);
-  console.log(`Vaults to create: ${NUM_VAULTS}`);
   console.log(`Users per vault: ${USERS_PER_VAULT}`);
   console.log("");
 
-  // Step 1: Fund manager via friendbot + mint USDC
+  // Step 1: Fund manager via friendbot
   console.log("Step 1: Funding manager account...");
   try {
     await fundWithFriendbot(managerPublicKey);
@@ -191,10 +244,11 @@ async function main() {
     throw error;
   }
 
-  // Check and mint tokens for manager (USDC + XTAR)
+  // Step 2: Mint USDC + XTAR for manager (needed for vault seed deposits)
+  console.log("");
+  console.log("Step 2: Checking manager token balances...");
   for (const { name, contract } of [
-    { name: "USDC", contract: TESTNET_USDC },
-    { name: "XTAR", contract: TESTNET_XTAR },
+    { name: "USDC", contract: TESTNET_BLEND_USDC },
   ]) {
     let balance = 0n;
     try {
@@ -208,110 +262,90 @@ async function main() {
       // No balance yet
     }
 
-    if (balance > 0n) {
-      console.log(`  Manager already has ${name} balance: ${balance}`);
-    } else {
-      console.log(`  Manager has no ${name}. Minting via Soroswap faucet...`);
+    console.log(`  ${name} balance: ${balance} (${Number(balance) / 1e7} tokens)`);
+    const seedNeeded = BigInt(SEED_AMOUNT);
+    if (balance < seedNeeded) {
+      console.log(`  Need at least ${Number(seedNeeded) / 1e7} tokens for seed deposit. Minting via Blend faucet...`);
       try {
-        await mintSoroswapToken(managerPublicKey, contract);
+        await mintBlendToManager(managerPublicKey, contract);
         const bal = await simulateContractCall(
           contract, "balance",
           [new Address(managerPublicKey).toScVal()],
           managerPublicKey
         );
         balance = BigInt(bal as string | number);
-        console.log(`  ${name} minted. Balance: ${balance}`);
+        console.log(`  ${name} minted. Balance: ${balance} (${Number(balance) / 1e7} tokens)`);
       } catch (error) {
         console.warn(`  Warning: Failed to mint ${name} for manager:`, error);
-        console.warn(`  ${name} vault deposits may fail. You can mint manually later.`);
       }
     }
   }
   console.log("");
 
-  // Step 2: Deploy vaults
-  console.log(`Step 2: Deploying ${NUM_VAULTS} vaults...`);
-  const factoryContract = new Contract(DEFINDEX_FACTORY);
+  // Step 3: Fetch testnet strategy addresses
+  console.log("Step 3: Fetching testnet strategy addresses...");
+  const contracts = await fetchTestnetContracts();
+  const usdcBlendStrategy = contracts.ids.USDC_blend_strategy;
+  const xlmBlendStrategy = contracts.ids.XLM_blend_strategy;
+  console.log(`  USDC Blend Strategy: ${usdcBlendStrategy}`);
+  console.log(`  XLM Blend Strategy:  ${xlmBlendStrategy}`);
+  console.log("");
+
+  // Step 4: Create vaults via DeFindex API
+  const vaultConfigs: VaultConfig[] = [
+    {
+      name: "Demo USDC Vault",
+      symbol: "dfUSDC",
+      assetAddress: TESTNET_BLEND_USDC,
+      assetSymbol: "USDC",
+      strategyAddress: usdcBlendStrategy,
+      strategyName: "USDC_blend_strategy",
+    },
+    {
+      name: "Demo XLM Vault",
+      symbol: "dfXLM",
+      assetAddress: TESTNET_XLM,
+      assetSymbol: "XLM",
+      strategyAddress: xlmBlendStrategy,
+      strategyName: "XLM_blend_strategy",
+    },
+  ];
+
+  console.log(`Step 4: Creating ${vaultConfigs.length} vaults via DeFindex API...`);
   const vaults: { address: string; asset: string; assetName: string }[] = [];
 
-  for (let i = 0; i < NUM_VAULTS; i++) {
-    // Alternate between XTAR and USDC
-    const assetAddress = i % 2 === 0 ? TESTNET_XTAR : TESTNET_USDC;
-    const assetName = assetAddress === TESTNET_XTAR ? "XTAR" : "USDC";
-
-    console.log(`  Creating vault ${i + 1}/${NUM_VAULTS} (${assetName})...`);
+  for (let i = 0; i < vaultConfigs.length; i++) {
+    const vc = vaultConfigs[i];
+    console.log(`  Creating vault ${i + 1}/${vaultConfigs.length} (${vc.name})...`);
 
     try {
-      const operation = buildCreateVaultOperation(managerPublicKey, assetAddress, factoryContract);
-      const txHash = await buildAndSendTx(managerKeypair, operation);
-      console.log(`    TX: ${txHash}`);
-
-      // Get the vault address from the transaction result
-      const txResult = await rpcServer.getTransaction(txHash);
-      if (txResult.status !== "SUCCESS" || !txResult.returnValue) {
-        throw new Error(`Transaction did not return a vault address`);
+      const apiResponse = await createVaultViaAPI(managerPublicKey, vc, network);
+      console.log(`    Predicted address: ${apiResponse.predictedVaultAddress}`);
+      if (apiResponse.warning) {
+        console.log(`    Warning: ${apiResponse.warning}`);
       }
 
-      const vaultAddress = StellarSdk.scValToNative(txResult.returnValue) as string;
-      console.log(`    Vault deployed: ${vaultAddress}`);
+      console.log("    Signing and submitting transaction...");
+      const txHash = await signAndSendXdr(apiResponse.xdr, managerKeypair);
+      console.log(`    TX confirmed: ${txHash}`);
 
-      vaults.push({ address: vaultAddress, asset: assetAddress, assetName });
+      vaults.push({
+        address: apiResponse.predictedVaultAddress,
+        asset: vc.assetAddress,
+        assetName: vc.assetSymbol,
+      });
     } catch (error) {
-      console.error(`    Failed to create vault ${i + 1}:`, error);
+      console.error(`    Failed to create vault:`, error);
       throw error;
     }
   }
   console.log("");
 
-  // Step 3: Seed vaults with initial deposit (avoids min liquidity fee on distribute)
-  const SEED_AMOUNT = 2000n;
-  console.log("Step 3: Seeding vaults with initial deposit...");
-
-  for (const vault of vaults) {
-    let totalSupply = 0n;
-    try {
-      const result = await simulateContractCall(
-        vault.address, "total_supply", [], managerPublicKey
-      );
-      totalSupply = BigInt(result as string | number);
-    } catch {
-      // No supply yet
-    }
-
-    if (totalSupply > 0n) {
-      console.log(`  ${vault.address.substring(0, 8)}... (${vault.assetName}) already has supply: ${totalSupply} — skipping`);
-      continue;
-    }
-
-    console.log(`  ${vault.address.substring(0, 8)}... (${vault.assetName}) is empty — depositing ${SEED_AMOUNT}...`);
-    try {
-      const vaultContract = new Contract(vault.address);
-      const amountScVal = nativeToScVal(SEED_AMOUNT, { type: "i128" });
-
-      const operation = vaultContract.call(
-        "deposit",
-        xdr.ScVal.scvVec([amountScVal]),  // amounts_desired
-        xdr.ScVal.scvVec([amountScVal]),  // amounts_min
-        new Address(managerPublicKey).toScVal(),  // from
-        xdr.ScVal.scvBool(false)  // invest
-      );
-
-      const txHash = await buildAndSendTx(managerKeypair, operation);
-      console.log(`    Seed deposit confirmed: ${txHash}`);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.error(`    Seed deposit FAILED: ${msg}`);
-      console.warn("    Distribute may fail for this vault due to min liquidity fee.");
-    }
-  }
-  console.log("");
-
-  // Step 4: Create and fund users
-  console.log(`Step 4: Creating ${USERS_PER_VAULT} users per vault...`);
+  // Step 5: Create users per vault
+  console.log(`Step 5: Creating ${USERS_PER_VAULT} users per vault...`);
   const usersByVault: Record<string, { publicKey: string; keypair: Keypair }[]> = {};
 
   for (const vault of vaults) {
-    
     console.log(`  Vault ${vault.address.substring(0, 8)}... (${vault.assetName}):`);
     usersByVault[vault.address] = [];
 
@@ -321,38 +355,54 @@ async function main() {
       usersByVault[vault.address].push({ publicKey: userPublicKey, keypair: userKeypair });
 
       if ((j + 1) % 5 === 0 || j === USERS_PER_VAULT - 1) {
-        console.log(`    Funded ${j + 1}/${USERS_PER_VAULT} users }`);
+        console.log(`    Created ${j + 1}/${USERS_PER_VAULT} users`);
       }
-      // Small delay to avoid rate limiting
-      await new Promise((r) => setTimeout(r, 500));
     }
   }
   console.log("");
 
-  // Step 5: Generate simulated data
-  console.log("Step 5: Generating simulated data...");
-  const csvRows: string[] = ["vault,asset,user,amount"];
+  // Step 6: Generate CSV
+  // Budget per vault: 500 tokens (7 decimals). Random split across users.
+  const BUDGET_PER_VAULT = 500_0000000;
+  console.log(`Step 6: Generating demo CSV (${BUDGET_PER_VAULT / 1e7} tokens budget per vault)...`);
+  const csvRows: string[] = ["asset,vault,user,amount"];
 
   for (const vault of vaults) {
     const users = usersByVault[vault.address];
-    for (const user of users) {
-      // Random amount between 1 and 1,000 (in 7-decimal stroops)
-      const amount = Math.floor(Math.random() * 999_0000000 + 1_0000000);
-      csvRows.push(`${vault.address},${vault.asset},${user.publicKey},${amount}`);
+    // Generate random weights and normalize to fit budget
+    const weights = users.map(() => Math.random());
+    const totalWeight = weights.reduce((s, w) => s + w, 0);
+
+    for (let idx = 0; idx < users.length; idx++) {
+      const amount = Math.max(
+        1_0000000, // minimum 1 token
+        Math.floor((weights[idx] / totalWeight) * BUDGET_PER_VAULT)
+      );
+      csvRows.push(`${vault.asset},${vault.address},${users[idx].publicKey},${amount}`);
     }
   }
 
-  // Step 6: Save CSV
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const csvFilename = `demo_testnet_${timestamp}.csv`;
   const csvPath = getOutputPath("demo", csvFilename);
   fs.writeFileSync(csvPath, csvRows.join("\n"));
-
+  console.log(`  CSV written to: ${csvPath}`);
   console.log("");
+
+  // Step 7: Check if minting is needed and auto-run mint
+  console.log("Step 7: Checking if additional minting is needed...");
+  try {
+    execSync(`npx tsx src/mint.ts ${csvPath}`, { stdio: "inherit" });
+  } catch (error) {
+    console.warn("  Warning: Auto-mint encountered errors. You may need to run pnpm mint manually.");
+  }
+  console.log("");
+
+  // Done
   console.log("=".repeat(60));
   console.log("Demo Complete");
   console.log("=".repeat(60));
-  console.log(`CSV written to: ${csvFilename}`);
+  console.log(`CSV: ${csvPath}`);
   console.log(`Vaults created: ${vaults.length}`);
   for (const vault of vaults) {
     const userCount = usersByVault[vault.address]?.length ?? 0;
@@ -360,7 +410,7 @@ async function main() {
   }
   console.log("");
   console.log("Next steps:");
-  console.log(`  run: pnpm distribute output/demo/${csvFilename}`);
+  console.log(`  pnpm distribute ${csvPath}`);
   console.log("=".repeat(60));
 }
 
