@@ -7,11 +7,11 @@ The Distributor enables fund distribution in **campaigns or events** for DeFinde
 ## How it works
 
 1. The script reads a CSV with recipients and amounts per vault
-2. Groups by vault and splits into batches (to respect Soroban's instruction budget)
+2. Groups by vault and splits into batches (to respect Soroban's instruction limit)
 3. For each batch, calls the `distribute` contract which in a single transaction:
-   - Deposits the batch total into the vault
-   - Receives minted dfTokens
-   - Distributes them pro-rata to each recipient
+   - Caller sends the total underlying amount to the distributor contract
+   - Distributor deposits the total amount in the vault and receives minted dfTokens
+   - Distributes dfTokens pro-rata to each recipient
 4. Verifies balances before/after and generates incremental CSV + log files with the results
 
 ## Prerequisites
@@ -90,7 +90,7 @@ This will:
 - Mint Blend USDC tokens via ephemeral accounts
 - Fetch blend strategy addresses from the DeFindex repo
 - Create 2 vaults (USDC + XLM) with blend strategies via the DeFindex API
-- Create 10 users per vault
+- Create a random number of users per vault (between 5 and 20)
 - Generate a test CSV at `output/demo/demo_testnet_<timestamp>.csv`
 - Auto-run mint if additional tokens are needed (XLM via Friendbot, Blend tokens via ephemeral accounts)
 
