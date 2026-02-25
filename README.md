@@ -73,6 +73,12 @@ cp .env.example .env
 
 `.env` comes configured for testnet by default.
 
+TODO: 
+SOROBAN_RPC=https://soroban-testnet.stellar.org
+HORIZON_RPC=https://horizon-testnet.stellar.org
+
+should be 4 variables , 2 for mainnet, 2 for testnet
+
 ### 2. Run the demo
 
 ```bash
@@ -83,6 +89,9 @@ This will:
 - Fund the manager account via Friendbot
 - Mint USDC/XTAR tokens via the Soroswap faucet
 - Deploy 3 test vaults via the DeFindex Factory
+TODO: Vaults should be set with a Blend strategy, and a real blend testnet pool (check defindex testnet)
+after first deposit, should do the rebalance to the strategy
+
 - Create 10 users per vault
 - Generate a test CSV at `output/demo/demo_testnet_<timestamp>.csv`
 
@@ -99,7 +108,7 @@ STELLAR_NETWORK=testnet pnpm mint output/demo/demo_testnet_<timestamp>.csv
 ```bash
 STELLAR_NETWORK=testnet pnpm distribute output/demo/demo_testnet_<timestamp>.csv
 ```
-
+TODO: log should be refreshed after each tx
 ## Deploying the Distributor contract
 
 ```bash
