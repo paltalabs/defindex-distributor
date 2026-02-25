@@ -136,6 +136,7 @@ async function fetchBalances(
 // ── Transaction Building ──
 function buildDistributeOperation(
   callerAddress: string,
+  assetAddress: string,
   vaultAddress: string,
   recipients: { user: string; amount: bigint }[]
 ): StellarSdk.xdr.Operation {
@@ -160,6 +161,7 @@ function buildDistributeOperation(
   return distributorContract.call(
     "distribute",
     new Address(callerAddress).toScVal(),
+    new Address(assetAddress).toScVal(),
     new Address(vaultAddress).toScVal(),
     recipientsScVal
   );
@@ -296,6 +298,7 @@ async function main() {
 
       const operation = buildDistributeOperation(
         sourcePublicKey,
+        group.asset,
         vaultId,
         batch
       );
