@@ -3,7 +3,12 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, vec, Address, Env, Vec};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    token::StellarAssetClient,
+    vec, Address, Env, Event as _, Vec,
+};
+use super::events::Distributed;
 
 mod integration {
     use super::*;
@@ -307,6 +312,53 @@ mod integration {
         assert_eq!(f.vault.balance(&recipient2), df2);
         assert_eq!(f.vault.balance(&caller), 0);
     }
+
+    /// Every recipient generates exactly one `Distributed` event with correct
+    /// asset, vault, user, underlying_amount, and df_tokens fields.
+    /// Uses the real blend-backed vault so the exchange rate is non-trivial.
+    #[test]
+    fn test_distribute_events_emitted() {
+        let f = DistributorTestFixture::create();
+        let env = &f.env;
+
+        let caller     = Address::generate(env);
+        let recipient1 = Address::generate(env);
+        let recipient2 = Address::generate(env);
+
+        let amount1 = 600_0000000_i128;
+        let amount2 = 400_0000000_i128;
+        f.usdc_admin.mint(&caller, &(amount1 + amount2));
+
+        let recipients: Vec<Recipient> = vec![
+            env,
+            Recipient { address: recipient1.clone(), amount: amount1 },
+            Recipient { address: recipient2.clone(), amount: amount2 },
+        ];
+
+        let results = f.distributor.distribute(
+            &caller, &f.usdc.address, &f.vault.address, &recipients,
+        );
+        let df1 = results.get(0).unwrap().1;
+        let df2 = results.get(1).unwrap().1;
+
+        let ev0 = Distributed {
+            asset: f.usdc.address.clone(), vault: f.vault.address.clone(), user: recipient1.clone(),
+            underlying_amount: amount1, df_tokens: df1,
+        };
+        let ev1 = Distributed {
+            asset: f.usdc.address.clone(), vault: f.vault.address.clone(), user: recipient2.clone(),
+            underlying_amount: amount2, df_tokens: df2,
+        };
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&f.distributor.address),
+            vec![
+                env,
+                (f.distributor.address.clone(), ev0.topics(env), ev0.data(env)),
+                (f.distributor.address.clone(), ev1.topics(env), ev1.data(env)),
+            ]
+        );
+    }
 }
 
 // ── Mock vault ────────────────────────────────────────────────────────────────
@@ -602,4 +654,284 @@ fn test_no_df_tokens_lost_to_rounding() {
     let total_distributed: i128 = (0..5_u32).map(|i| results.get(i).unwrap().1).sum();
     assert_eq!(total_distributed, 13_i128);
     assert_eq!(vault.balance(&caller), 0_i128);
+}
+
+// ── Event tests ───────────────────────────────────────────────────────────────
+
+/// One `Distributed` event is emitted per recipient.
+/// Verifies the topic name, contract address, and all data fields
+/// (asset, vault, user, underlying_amount, df_tokens) at a 1:1 mock rate.
+#[test]
+fn test_events_emitted_per_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (asset_id, vault_id, client) = setup(&env);
+
+    let caller     = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+
+    let amount1 = 600_i128;
+    let amount2 = 400_i128;
+    StellarAssetClient::new(&env, &asset_id).mint(&caller, &(amount1 + amount2));
+
+    let recipients: Vec<Recipient> = vec![
+        &env,
+        Recipient { address: recipient1.clone(), amount: amount1 },
+        Recipient { address: recipient2.clone(), amount: amount2 },
+    ];
+
+    let results = client.distribute(&caller, &asset_id, &vault_id, &recipients);
+    let df1 = results.get(0).unwrap().1;
+    let df2 = results.get(1).unwrap().1;
+
+    let ev0 = Distributed {
+        asset: asset_id.clone(), vault: vault_id.clone(), user: recipient1.clone(),
+        underlying_amount: amount1, df_tokens: df1,
+    };
+    let ev1 = Distributed {
+        asset: asset_id.clone(), vault: vault_id.clone(), user: recipient2.clone(),
+        underlying_amount: amount2, df_tokens: df2,
+    };
+
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (client.address.clone(), ev0.topics(&env), ev0.data(&env)),
+            (client.address.clone(), ev1.topics(&env), ev1.data(&env)),
+        ]
+    );
+}
+
+/// With a non-1:1 exchange rate and rounding, the event captures the original
+/// underlying input amount and the actual (floored or remainder) df_tokens.
+#[test]
+fn test_events_non_1to1_exchange_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (asset_id, vault_id, client) = setup(&env);
+    let vault = MockVaultClient::new(&env, &vault_id);
+
+    // Vault mints 10 df tokens for 9 units in → non-trivial rounding
+    vault.preset_df_mint(&10_i128);
+
+    let caller     = Address::generate(&env);
+    let recipient1 = Address::generate(&env);
+    let recipient2 = Address::generate(&env);
+    let recipient3 = Address::generate(&env);
+
+    // total=9, df_minted=10
+    // user1: floor(3*10/9) = 3, user2: floor(3*10/9) = 3, user3 (last): 10-3-3 = 4
+    StellarAssetClient::new(&env, &asset_id).mint(&caller, &9_i128);
+
+    let recipients: Vec<Recipient> = vec![
+        &env,
+        Recipient { address: recipient1.clone(), amount: 3_i128 },
+        Recipient { address: recipient2.clone(), amount: 3_i128 },
+        Recipient { address: recipient3.clone(), amount: 3_i128 },
+    ];
+
+    client.distribute(&caller, &asset_id, &vault_id, &recipients);
+
+    let ev0 = Distributed {
+        asset: asset_id.clone(), vault: vault_id.clone(), user: recipient1.clone(),
+        underlying_amount: 3_i128, df_tokens: 3_i128, // floor(3*10/9)
+    };
+    let ev1 = Distributed {
+        asset: asset_id.clone(), vault: vault_id.clone(), user: recipient2.clone(),
+        underlying_amount: 3_i128, df_tokens: 3_i128, // floor(3*10/9)
+    };
+    let ev2 = Distributed {
+        asset: asset_id.clone(), vault: vault_id.clone(), user: recipient3.clone(),
+        underlying_amount: 3_i128, df_tokens: 4_i128, // remainder: 10 - 3 - 3
+    };
+
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (client.address.clone(), ev0.topics(&env), ev0.data(&env)),
+            (client.address.clone(), ev1.topics(&env), ev1.data(&env)),
+            (client.address.clone(), ev2.topics(&env), ev2.data(&env)),
+        ]
+    );
+}
+
+// ── Auth tests ────────────────────────────────────────────────────────────────
+//
+// These tests use explicit `mock_auths` — never `mock_all_auths` — to verify
+// that `distribute` enforces exactly the right authorization tree:
+//
+//   caller authorises:
+//     └─ distribute(caller, asset, vault, recipients)
+//          └─ asset.transfer(caller → distributor, total)   ← sub-invocation
+//
+// The `authorize_as_current_contract` entries (distributor → vault) are
+// generated by the contract itself and are NOT part of the caller's tree.
+
+mod auth {
+    use super::*;
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    /// Returns (asset_id, asset_admin_address, vault_id, distributor_client).
+    /// The admin address is needed to explicitly mock the SAC mint auth.
+    fn setup_auth(e: &Env) -> (Address, Address, Address, DistributorClient<'_>) {
+        let admin = Address::generate(e);
+        let asset_id = e.register_stellar_asset_contract_v2(admin.clone()).address();
+        let vault_id = e.register(mock_vault::MockVault, ());
+        let distributor_id = e.register(Distributor, ());
+        (asset_id, admin, vault_id, DistributorClient::new(e, &distributor_id))
+    }
+
+    /// Mint `amount` of the SAC to `to`, authorising with the SAC admin.
+    fn mint(e: &Env, asset_id: &Address, admin: &Address, to: &Address, amount: i128) {
+        e.mock_auths(&[MockAuth {
+            address: admin,
+            invoke: &MockAuthInvoke {
+                contract: asset_id,
+                fn_name: "mint",
+                args: (to.clone(), amount).into_val(e),
+                sub_invokes: &[],
+            },
+        }]);
+        StellarAssetClient::new(e, asset_id).mint(to, &amount);
+    }
+
+    /// Happy path: caller provides the full and correct auth tree — should succeed.
+    ///
+    /// Auth tree the caller must sign:
+    ///   distribute(caller, asset, vault, recipients)
+    ///     └─ asset.transfer(caller, distributor, 1000)
+    #[test]
+    fn test_correct_auth_passes() {
+        let env = Env::default();
+        let (asset_id, admin, vault_id, client) = setup_auth(&env);
+        let distributor_id = client.address.clone();
+
+        let caller = Address::generate(&env);
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let total: i128 = 1000;
+
+        mint(&env, &asset_id, &admin, &caller, total);
+
+        let recipients = vec![
+            &env,
+            Recipient { address: r1.clone(), amount: 600_i128 },
+            Recipient { address: r2.clone(), amount: 400_i128 },
+        ];
+
+        env.mock_auths(&[MockAuth {
+            address: &caller,
+            invoke: &MockAuthInvoke {
+                contract: &distributor_id,
+                fn_name: "distribute",
+                args: (caller.clone(), asset_id.clone(), vault_id.clone(), recipients.clone())
+                    .into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &asset_id,
+                    fn_name: "transfer",
+                    args: (caller.clone(), distributor_id.clone(), total).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+
+        let results = client.distribute(&caller, &asset_id, &vault_id, &recipients);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results.get(0).unwrap(), (r1.clone(), 600_i128));
+        assert_eq!(results.get(1).unwrap(), (r2.clone(), 400_i128));
+
+        let vault = MockVaultClient::new(&env, &vault_id);
+        assert_eq!(vault.balance(&r1), 600_i128);
+        assert_eq!(vault.balance(&r2), 400_i128);
+        assert_eq!(vault.balance(&caller), 0_i128);
+    }
+
+    /// No auth at all — panics immediately at `caller.require_auth()`.
+    #[test]
+    #[should_panic]
+    fn test_no_auth_panics() {
+        let env = Env::default();
+        let (asset_id, admin, vault_id, client) = setup_auth(&env);
+
+        let caller = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        mint(&env, &asset_id, &admin, &caller, 500);
+
+        // No mock_auths → caller.require_auth() in distribute panics.
+        let recipients = vec![&env, Recipient { address: recipient.clone(), amount: 500_i128 }];
+        client.distribute(&caller, &asset_id, &vault_id, &recipients);
+    }
+
+    /// Caller authorises `distribute` but omits the `asset.transfer` sub-invocation.
+    /// Panics when the SAC checks caller auth for the underlying transfer.
+    #[test]
+    #[should_panic]
+    fn test_missing_asset_transfer_sub_invoke_panics() {
+        let env = Env::default();
+        let (asset_id, admin, vault_id, client) = setup_auth(&env);
+        let distributor_id = client.address.clone();
+
+        let caller = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let total: i128 = 500;
+
+        mint(&env, &asset_id, &admin, &caller, total);
+
+        let recipients = vec![&env, Recipient { address: recipient.clone(), amount: total }];
+
+        // Auth covers the outer distribute call but NOT the nested asset.transfer.
+        env.mock_auths(&[MockAuth {
+            address: &caller,
+            invoke: &MockAuthInvoke {
+                contract: &distributor_id,
+                fn_name: "distribute",
+                args: (caller.clone(), asset_id.clone(), vault_id.clone(), recipients.clone())
+                    .into_val(&env),
+                sub_invokes: &[], // ← missing asset.transfer sub-invocation
+            },
+        }]);
+
+        // The SAC calls caller.require_auth() for the transfer and finds no entry.
+        client.distribute(&caller, &asset_id, &vault_id, &recipients);
+    }
+
+    /// Auth is set for an impostor, not for the real caller — panics at the
+    /// top-level `caller.require_auth()` check inside distribute.
+    #[test]
+    #[should_panic]
+    fn test_wrong_caller_auth_panics() {
+        let env = Env::default();
+        let (asset_id, _admin, vault_id, client) = setup_auth(&env);
+        let distributor_id = client.address.clone();
+
+        let real_caller = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let total: i128 = 500;
+
+        let recipients = vec![&env, Recipient { address: recipient.clone(), amount: total }];
+
+        // Auth is set for impostor — real_caller has no auth entry.
+        env.mock_auths(&[MockAuth {
+            address: &impostor,
+            invoke: &MockAuthInvoke {
+                contract: &distributor_id,
+                fn_name: "distribute",
+                args: (real_caller.clone(), asset_id.clone(), vault_id.clone(), recipients.clone())
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        // Panics: real_caller.require_auth() has no matching entry.
+        client.distribute(&real_caller, &asset_id, &vault_id, &recipients);
+    }
 }

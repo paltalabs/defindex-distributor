@@ -167,6 +167,14 @@ impl Distributor {
                 }),
             ]);
             df_token.transfer(&e.current_contract_address(), &r.address, &user_df);
+            events::Distributed {
+                asset: asset.clone(),
+                vault: vault.clone(),
+                user: r.address.clone(),
+                underlying_amount: r.amount,
+                df_tokens: user_df,
+            }
+            .publish(&e);
             distributed = match distributed.checked_add(user_df) {
                 Some(v) => v,
                 None => panic!("distributed overflow"),
@@ -178,6 +186,8 @@ impl Distributor {
         results
     }
 }
+
+mod events;
 
 #[cfg(test)]
 mod testutils;
