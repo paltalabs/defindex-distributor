@@ -37,12 +37,6 @@ Contract ID will be in `~/.config/stellar/contract-ids/defindex-distributor.json
    SOROBAN_RPC=https://soroban-testnet.stellar.org
    HORIZON_RPC=https://horizon-testnet.stellar.org
    STELLAR_SECRET_KEY=S...          # Account holding funds for deposits/transfers
-   ROUTER_CONTRACT_TESTNET=CAG5...          # Optional, defaults to mainnet router
-   ROUTER_CONTRACT_MAINNET=CBKH...
-   ```
-
-   >[!NOTE]
-   > `ROUTER_CONTRACT` is a soroban smart contract created by Creit-Tech that allows execute multiple Soroban calls in one. [Explore repo.](https://github.com/Creit-Tech/Stellar-Router-Contract)
 
 ## Distribution Pipeline
 
