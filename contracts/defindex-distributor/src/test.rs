@@ -3,7 +3,7 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, vec, Address, Env, Vec};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, vec, Address, Env, Vec};
 
 mod integration {
     use super::*;
@@ -202,7 +202,7 @@ mod integration {
 
         // distribute() deposits `deposit_total` into the vault on behalf of
         // `caller`, then transfers the minted df-tokens to each recipient.
-        let results = f.distributor.distribute(&caller, &f.vault.address, &recipients);
+        let results = f.distributor.distribute(&caller, &f.usdc.address, &f.vault.address, &recipients);
 
         // The vault should have issued some df-tokens
         let df1 = results.get(0).unwrap().1;
@@ -290,7 +290,7 @@ mod integration {
             Recipient { address: recipient2.clone(), amount: 80_0000000_i128 },
         ];
 
-        let results = f.distributor.distribute(&caller, &f.vault.address, &recipients);
+        let results = f.distributor.distribute(&caller, &f.usdc.address, &f.vault.address, &recipients);
 
         let df1 = results.get(0).unwrap().1;
         let df2 = results.get(1).unwrap().1;
@@ -424,10 +424,12 @@ use mock_vault::MockVaultClient;
 
 // ── setup helper ──────────────────────────────────────────────────────────────
 
-fn setup(e: &Env) -> (Address, DistributorClient<'_>) {
+fn setup(e: &Env) -> (Address, Address, DistributorClient<'_>) {
+    let admin = Address::generate(e);
+    let asset_id = e.register_stellar_asset_contract_v2(admin).address();
     let vault_id = e.register(mock_vault::MockVault, ());
     let distributor_id = e.register(Distributor, ());
-    (vault_id, DistributorClient::new(e, &distributor_id))
+    (asset_id, vault_id, DistributorClient::new(e, &distributor_id))
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -438,7 +440,7 @@ fn test_two_recipients_exact_split() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (vault_id, client) = setup(&env);
+    let (asset_id, vault_id, client) = setup(&env);
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller     = Address::generate(&env);
@@ -448,13 +450,15 @@ fn test_two_recipients_exact_split() {
     // total=1000, df_minted=1000 (1:1 default)
     // user1: floor(300*1000/1000) = 300
     // user2 (last): 1000 - 300 = 700
+    StellarAssetClient::new(&env, &asset_id).mint(&caller, &1000_i128);
+
     let recipients: Vec<Recipient> = vec![
         &env,
         Recipient { address: recipient1.clone(), amount: 300_i128 },
         Recipient { address: recipient2.clone(), amount: 700_i128 },
     ];
 
-    let results = client.distribute(&caller, &vault_id, &recipients);
+    let results = client.distribute(&caller, &asset_id, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient1.clone(), 300_i128));
     assert_eq!(results.get(1).unwrap(), (recipient2.clone(), 700_i128));
@@ -470,7 +474,7 @@ fn test_uneven_split_floors_correctly() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (vault_id, client) = setup(&env);
+    let (asset_id, vault_id, client) = setup(&env);
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller     = Address::generate(&env);
@@ -483,13 +487,15 @@ fn test_uneven_split_floors_correctly() {
     // total=3, df_minted=10
     // user1: floor(1 * 10 / 3) = floor(3.33) = 3
     // user2 (last): 10 - 3 = 7
+    StellarAssetClient::new(&env, &asset_id).mint(&caller, &3_i128);
+
     let recipients: Vec<Recipient> = vec![
         &env,
         Recipient { address: recipient1.clone(), amount: 1_i128 },
         Recipient { address: recipient2.clone(), amount: 2_i128 },
     ];
 
-    let results = client.distribute(&caller, &vault_id, &recipients);
+    let results = client.distribute(&caller, &asset_id, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient1.clone(), 3_i128));
     assert_eq!(results.get(1).unwrap(), (recipient2.clone(), 7_i128));
@@ -503,7 +509,7 @@ fn test_rounding_remainder_goes_to_last() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (vault_id, client) = setup(&env);
+    let (asset_id, vault_id, client) = setup(&env);
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller     = Address::generate(&env);
@@ -518,6 +524,8 @@ fn test_rounding_remainder_goes_to_last() {
     // user1: floor(3 * 10 / 9) = floor(3.33) = 3
     // user2: floor(3 * 10 / 9) = floor(3.33) = 3
     // user3 (last): 10 - 3 - 3 = 4  (gets remainder, not floor(3.33)=3)
+    StellarAssetClient::new(&env, &asset_id).mint(&caller, &9_i128);
+
     let recipients: Vec<Recipient> = vec![
         &env,
         Recipient { address: recipient1.clone(), amount: 3_i128 },
@@ -525,7 +533,7 @@ fn test_rounding_remainder_goes_to_last() {
         Recipient { address: recipient3.clone(), amount: 3_i128 },
     ];
 
-    let results = client.distribute(&caller, &vault_id, &recipients);
+    let results = client.distribute(&caller, &asset_id, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient1.clone(), 3_i128));
     assert_eq!(results.get(1).unwrap(), (recipient2.clone(), 3_i128));
@@ -539,7 +547,7 @@ fn test_single_recipient_gets_all_df_tokens() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (vault_id, client) = setup(&env);
+    let (asset_id, vault_id, client) = setup(&env);
     let vault = MockVaultClient::new(&env, &vault_id);
 
     let caller    = Address::generate(&env);
@@ -548,12 +556,14 @@ fn test_single_recipient_gets_all_df_tokens() {
     // Vault issues 999 df tokens for 500 units in
     vault.preset_df_mint(&999_i128);
 
+    StellarAssetClient::new(&env, &asset_id).mint(&caller, &500_i128);
+
     let recipients: Vec<Recipient> = vec![
         &env,
         Recipient { address: recipient.clone(), amount: 500_i128 },
     ];
 
-    let results = client.distribute(&caller, &vault_id, &recipients);
+    let results = client.distribute(&caller, &asset_id, &vault_id, &recipients);
 
     assert_eq!(results.get(0).unwrap(), (recipient.clone(), 999_i128));
     assert_eq!(vault.balance(&recipient), 999_i128);
@@ -566,13 +576,15 @@ fn test_no_df_tokens_lost_to_rounding() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (vault_id, client) = setup(&env);
+    let (asset_id, vault_id, client) = setup(&env);
 
     let caller = Address::generate(&env);
 
     let vault = MockVaultClient::new(&env, &vault_id);
     // 7 inputs → 13 df tokens: guarantees non-trivial rounding
     vault.preset_df_mint(&13_i128);
+
+    StellarAssetClient::new(&env, &asset_id).mint(&caller, &7_i128);
 
     let users: [Address; 5] = core::array::from_fn(|_| Address::generate(&env));
 
@@ -585,7 +597,7 @@ fn test_no_df_tokens_lost_to_rounding() {
         Recipient { address: users[4].clone(), amount: 2_i128 },
     ];
 
-    let results = client.distribute(&caller, &vault_id, &recipients);
+    let results = client.distribute(&caller, &asset_id, &vault_id, &recipients);
 
     let total_distributed: i128 = (0..5_u32).map(|i| results.get(i).unwrap().1).sum();
     assert_eq!(total_distributed, 13_i128);

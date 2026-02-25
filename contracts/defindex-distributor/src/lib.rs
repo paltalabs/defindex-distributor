@@ -55,6 +55,7 @@ impl Distributor {
     pub fn distribute(
         e: Env,
         caller: Address,
+        asset: Address,
         vault: Address,
         recipients: Vec<Recipient>,
     ) -> Vec<(Address, i128)> {
@@ -66,9 +67,6 @@ impl Distributor {
         // ── 1. Validate and sum all input amounts ─────────────────────────────
         if n == 0 {
             panic!("recipients must not be empty");
-        }
-        if n > 100 {
-            panic!("too many recipients (max 100)");
         }
 
         let mut seen: Map<Address, ()> = Map::new(&e);
@@ -90,36 +88,46 @@ impl Distributor {
             };
         }
 
-        // ── 2. Deposit into the defindex vault ────────────────────────────────
-        // The vault pulls `total` of the underlying asset from `caller` and
-        // mints df tokens back to `caller`.
+        // ── 2. Pull underlying asset from caller into this contract ──────────
+        let asset_token = TokenClient::new(&e, &asset);
+        asset_token.transfer(&caller, &e.current_contract_address(), &total);
+
+        // ── 3. Deposit into the defindex vault ────────────────────────────────
+        // The vault pulls `total` of the underlying asset from this contract and
+        // mints df tokens back to this contract.
         let vault_client = vault::Client::new(&e, &vault);
+
+        e.authorize_as_current_contract(vec![
+            &e,
+            InvokerContractAuthEntry::Contract(SubContractInvocation {
+                context: ContractContext {
+                    contract: asset.clone(),
+                    fn_name: Symbol::new(&e, "transfer"),
+                    args: (
+                        e.current_contract_address(),
+                        vault.clone(),
+                        total,
+                    )
+                        .into_val(&e),
+                },
+                sub_invocations: vec![&e],
+            }),
+        ]);
+
         let (_deposited, df_tokens_minted, _allocs) = vault_client.deposit(
-            &vec![&e, total], // amounts_desired  (single-asset vault)
-            &vec![&e, total], // amounts_min
-            &caller,          // from: source of funds AND recipient of df tokens
-            &true,            // invest immediately
+            &vec![&e, total],
+            &vec![&e, total],
+            &e.current_contract_address(),
+            &true,
         );
 
-        // Caller sends all the dftokens to the distributor contract
+        // df tokens are already in this contract (vault minted them to e.current_contract_address())
         let df_token = TokenClient::new(&e, &vault);
-        df_token.transfer(&caller, &e.current_contract_address(), &df_tokens_minted);
-        // From now on, all subsequent txs should be done by the distributor contract, not by the caller
-        // This contract should generate the authorizations to transfer the df tokens to the recipients
-        
 
-        // ── 3. Get the authoritative price per share from the vault ───────────
-        // Ask the vault how much underlying `df_tokens_minted` shares are worth.
-        // This uses the vault's own exchange-rate calculation (post-deposit state)
-        // rather than assuming the price equals the raw `total` input, which can
-        // differ slightly due to rounding in the share-minting formula.
-        let asset_amounts = vault_client.get_asset_amounts_per_shares(&df_tokens_minted);
-        let underlying_for_minted: i128 = asset_amounts
-            .get(0)
-            .expect("vault must have at least one asset");
-
-        // ── 4. Distribute df tokens from caller to each recipient ─────────────
-        // The vault contract IS the df token (implements SAC).
+        // ── 4. Distribute df tokens pro-rata to each recipient ────────────────
+        // Each recipient contributed r.amount / total of the deposit, so they
+        // receive r.amount / total * df_tokens_minted shares.
+        // floor(r.amount * df_tokens_minted / total) — no extra vault call needed.
 
         let mut distributed: i128 = 0;
         let mut results: Vec<(Address, i128)> = vec![&e];
@@ -140,27 +148,8 @@ impl Distributor {
                 // Each recipient's share of df tokens is proportional to their
                 // underlying contribution relative to the vault's authoritative
                 // valuation of the total minted shares.
-                r.amount.fixed_div_floor(&e, &underlying_for_minted, &df_tokens_minted)
+                r.amount.fixed_div_floor(&e, &total, &df_tokens_minted)
             };
-            // this contract should generate the authorizations to transfer the df tokens to the recipients
-            // e.authorize_as_current_contract(vec![
-            //     &e,
-            //     InvokerContractAuthEntry::Contract(SubContractInvocation {
-            //         context: ContractContext {
-            //             contract: config.asset.clone(),
-            //             fn_name: Symbol::new(&e, "transfer"),
-            //             args: (
-            //                 e.current_contract_address(),
-            //                 config.pool.clone(),
-            //                 amount.clone(),
-            //             )
-            //                 .into_val(e),
-            //         },
-            //         sub_invocations: vec![&e],
-            //     }),
-            // ]);
-            // df token transfers should be done by the distributor contract (THIS)
-            // this contract should generate the authorizations to transfer the df tokens to the recipients
             e.authorize_as_current_contract(vec![
                 &e,
                 InvokerContractAuthEntry::Contract(SubContractInvocation {
