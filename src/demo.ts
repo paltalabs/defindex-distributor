@@ -18,7 +18,8 @@ import { DEFINDEX_API_URL, TESTNET_CONTRACTS_URL, TESTNET_BLEND_USDC, TESTNET_XL
 config();
 
 // ── Testnet Constants ──
-const USERS_PER_VAULT = 10;
+const USERS_PER_VAULT_MINIMUM = 5;
+const USERS_PER_VAULT_MAXIMUM = 20;
 
 // Seed deposit amount (in stroops, 7 decimals) — small amount to initialize vault
 const SEED_AMOUNT = 100_0000000; // 100 tokens
@@ -232,7 +233,7 @@ async function main() {
   console.log("=".repeat(60));
   console.log(`Manager: ${managerPublicKey}`);
   console.log(`Network: testnet`);
-  console.log(`Users per vault: ${USERS_PER_VAULT}`);
+  console.log(`Users per vault: ${USERS_PER_VAULT_MINIMUM}–${USERS_PER_VAULT_MAXIMUM} (random per vault)`);
   console.log("");
 
   // Step 1: Fund manager via friendbot
@@ -342,21 +343,22 @@ async function main() {
   }
   console.log("");
 
-  // Step 5: Create users per vault
-  console.log(`Step 5: Creating ${USERS_PER_VAULT} users per vault...`);
+  // Step 5: Create users per vault (random count between min and max)
+  console.log(`Step 5: Creating users per vault (${USERS_PER_VAULT_MINIMUM}–${USERS_PER_VAULT_MAXIMUM} random)...`);
   const usersByVault: Record<string, { publicKey: string; keypair: Keypair }[]> = {};
 
   for (const vault of vaults) {
-    console.log(`  Vault ${vault.address.substring(0, 8)}... (${vault.assetName}):`);
+    const n = USERS_PER_VAULT_MINIMUM + Math.floor(Math.random() * (USERS_PER_VAULT_MAXIMUM - USERS_PER_VAULT_MINIMUM + 1));
+    console.log(`  Vault ${vault.address.substring(0, 8)}... (${vault.assetName}): ${n} users`);
     usersByVault[vault.address] = [];
 
-    for (let j = 0; j < USERS_PER_VAULT; j++) {
+    for (let j = 0; j < n; j++) {
       const userKeypair = Keypair.random();
       const userPublicKey = userKeypair.publicKey();
       usersByVault[vault.address].push({ publicKey: userPublicKey, keypair: userKeypair });
 
-      if ((j + 1) % 5 === 0 || j === USERS_PER_VAULT - 1) {
-        console.log(`    Created ${j + 1}/${USERS_PER_VAULT} users`);
+      if ((j + 1) % 5 === 0 || j === n - 1) {
+        console.log(`    Created ${j + 1}/${n} users`);
       }
     }
   }

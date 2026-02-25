@@ -9,7 +9,7 @@ config();
 // Constants
 const MAINNET_ROUTER = "CDAW42JDSDEI2DXEPP4E7OAYNCRUA4LGCZHXCJ4BV5WVI4O4P77FO4UV";
 export const STELLAR_ROUTER_CONTRACT = process.env.ROUTER_CONTRACT || MAINNET_ROUTER;
-export const BATCH_SIZE = 10;
+export const BATCH_MAX_SIZE = 10;
 
 // Network configuration
 export type StellarNetwork = "testnet" | "mainnet";

@@ -11,7 +11,7 @@ import {
   sendTransaction,
   simulateContractCall,
   batchArray,
-  BATCH_SIZE,
+  BATCH_MAX_SIZE,
 } from "./utils";
 import { Logger } from "./logger";
 import { DISTRIBUTOR_MAINNET, DISTRIBUTOR_TESTNET } from "./addresses";
@@ -246,7 +246,7 @@ async function main() {
 
   console.log(`Total records: ${records.length}`);
   console.log(`Vaults: ${vaultGroups.size}`);
-  console.log(`Batch size: ${BATCH_SIZE}`);
+  console.log(`Max batch size: ${BATCH_MAX_SIZE}`);
   console.log("");
 
   if (records.length === 0) {
@@ -268,13 +268,13 @@ async function main() {
   for (const [vaultId, group] of vaultGroups) {
     const totalAmount = group.recipients.reduce((sum, r) => sum + r.amount, 0n);
     const users = group.recipients.map((r) => r.user);
-    const batches = batchArray(group.recipients, BATCH_SIZE);
+    const batches = batchArray(group.recipients, BATCH_MAX_SIZE);
 
     logger.logMessage("-".repeat(60));
     logger.logMessage(`Vault: ${vaultId}`);
     logger.logMessage(`Asset: ${group.asset}`);
     logger.logMessage(`Recipients: ${group.recipients.length} | Total amount: ${totalAmount}`);
-    logger.logMessage(`Batches: ${batches.length} (batch size: ${BATCH_SIZE})`);
+    logger.logMessage(`Batches: ${batches.length} (max batch size: ${BATCH_MAX_SIZE})`);
 
     // 2a. Pre-fetch dfToken balances (once for all users of this vault)
     logger.logMessage("  Fetching dfToken balances before...");
