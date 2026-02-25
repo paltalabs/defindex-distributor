@@ -323,7 +323,7 @@ mod integration {
 // test non-trivial exchange rates / floor rounding.
 
 mod mock_vault {
-    use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Vec};
+    use soroban_sdk::{contract, contractimpl, symbol_short, vec, Address, Env, Map, Vec};
 
     fn balances(e: &Env) -> Map<Address, i128> {
         e.storage()
@@ -352,6 +352,8 @@ mod mock_vault {
         /// Mints df tokens to `from`.  Uses preset if set, otherwise 1:1.
         /// Third element is `()` which decodes as `Option::None` on the caller
         /// side — matching the real vault's return type.
+        /// Also accumulates the exchange-rate state used by
+        /// `get_asset_amounts_per_shares`.
         pub fn deposit(
             e: Env,
             amounts_desired: Vec<i128>,
@@ -369,12 +371,34 @@ mod mock_vault {
                 .get(&symbol_short!("preset"))
                 .unwrap_or(total); // default: 1:1
 
+            // Track cumulative underlying and supply for get_asset_amounts_per_shares.
+            let prev_und: i128 = e.storage().instance().get(&symbol_short!("und")).unwrap_or(0);
+            let prev_sup: i128 = e.storage().instance().get(&symbol_short!("sup")).unwrap_or(0);
+            e.storage().instance().set(&symbol_short!("und"), &(prev_und + total));
+            e.storage().instance().set(&symbol_short!("sup"), &(prev_sup + df_minted));
+
             let mut bals = balances(&e);
             let cur = bals.get(from.clone()).unwrap_or(0);
             bals.set(from, cur + df_minted);
             save_bals(&e, &bals);
 
             (amounts_desired, df_minted, ())
+        }
+
+        /// Returns the underlying value of `vault_shares` shares.
+        /// Mirrors the real vault's `get_asset_amounts_per_shares` interface
+        /// (returns a single-element Vec for the one underlying asset).
+        pub fn get_asset_amounts_per_shares(e: Env, vault_shares: i128) -> Vec<i128> {
+            let total_und: i128 =
+                e.storage().instance().get(&symbol_short!("und")).unwrap_or(0);
+            let total_sup: i128 =
+                e.storage().instance().get(&symbol_short!("sup")).unwrap_or(0);
+            let amount = if total_sup == 0 {
+                0
+            } else {
+                vault_shares * total_und / total_sup
+            };
+            vec![&e, amount]
         }
 
         // ── SEP-41 token interface (df token = vault address) ─────────────────

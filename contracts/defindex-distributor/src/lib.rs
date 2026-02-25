@@ -96,7 +96,17 @@ impl Distributor {
             &true,            // invest immediately
         );
 
-        // ── 3. Distribute df tokens from caller to each recipient ─────────────
+        // ── 3. Get the authoritative price per share from the vault ───────────
+        // Ask the vault how much underlying `df_tokens_minted` shares are worth.
+        // This uses the vault's own exchange-rate calculation (post-deposit state)
+        // rather than assuming the price equals the raw `total` input, which can
+        // differ slightly due to rounding in the share-minting formula.
+        let asset_amounts = vault_client.get_asset_amounts_per_shares(&df_tokens_minted);
+        let underlying_for_minted: i128 = asset_amounts
+            .get(0)
+            .expect("vault must have at least one asset");
+
+        // ── 4. Distribute df tokens from caller to each recipient ─────────────
         // The vault contract IS the df token (implements SAC).
         let df_token = TokenClient::new(&e, &vault);
 
@@ -115,8 +125,11 @@ impl Distributor {
                     None => panic!("underflow distributing last recipient"),
                 }
             } else {
-                // floor( amount * df_tokens_minted / total )
-                r.amount.fixed_div_floor(&e, &total, &df_tokens_minted)
+                // floor( r.amount * df_tokens_minted / underlying_for_minted )
+                // Each recipient's share of df tokens is proportional to their
+                // underlying contribution relative to the vault's authoritative
+                // valuation of the total minted shares.
+                r.amount.fixed_div_floor(&e, &underlying_for_minted, &df_tokens_minted)
             };
 
             df_token.transfer(&caller, &r.address, &user_df);
