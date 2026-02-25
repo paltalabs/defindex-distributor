@@ -1,6 +1,6 @@
 build:
 	stellar contract build
-	stellar contract optimize --wasm target/wasm32v1-none/release/defindex_distributor.wasm
+	stellar contract build --optimize
 
 test:
 	cargo test;
