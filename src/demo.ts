@@ -21,6 +21,7 @@ config();
 // ── Testnet Constants ──
 const USERS_PER_VAULT_MINIMUM = 5;
 const USERS_PER_VAULT_MAXIMUM = 20;
+const BUDGET_PER_VAULT = 5_000_0000000;
 
 // Seed deposit amount (in stroops, 7 decimals) — small amount to initialize vault
 const SEED_AMOUNT = 100_0000000; // 100 tokens
@@ -367,7 +368,6 @@ async function main() {
 
   // Step 6: Generate CSV
   // Budget per vault: 500 tokens (7 decimals). Random split across users.
-  const BUDGET_PER_VAULT = 500_0000000;
   console.log(`Step 6: Generating demo CSV (${BUDGET_PER_VAULT / 1e7} tokens budget per vault)...`);
   const csvRows: string[] = ["asset,vault,user,amount"];
 

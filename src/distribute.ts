@@ -19,6 +19,8 @@ import { DISTRIBUTOR_MAINNET, DISTRIBUTOR_TESTNET } from "./addresses";
 
 config();
 
+const DELTA_ALERT_THRESHOLD = BigInt(10000);
+
 function getDistributorAddress(): string {
   return getNetwork() === "mainnet" ? DISTRIBUTOR_MAINNET : DISTRIBUTOR_TESTNET;
 }
@@ -354,11 +356,17 @@ async function main() {
     // 2d. Build log entries and display comparison table
     logger.logMessage("");
     logger.logMessage("  Results:");
-    logger.logMessage("  " + "-".repeat(130));
+    const SEP = "  " + "-".repeat(148);
+    logger.logMessage(SEP);
     logger.logMessage(
-      `  ${"User".padEnd(16)} ${"Batch".padStart(5)} ${"Amt Sent".padStart(14)} ${"dfTok Recv".padStart(14)} ${"Bal Before".padStart(14)} ${"Bal After".padStart(14)} ${"Delta".padStart(14)}`
+      `  ${"User".padEnd(16)} ${"Batch".padStart(5)} ${"Amt Sent".padStart(14)} ${"dfTok Recv".padStart(14)} ${"Sent/Recv Δ".padStart(14)} ${"Bal Before".padStart(14)} ${"Bal After".padStart(14)} ${"Bal Δ".padStart(14)}`
     );
-    logger.logMessage("  " + "-".repeat(130));
+    logger.logMessage(SEP);
+
+    const YELLOW_BG = "\x1b[43;30m";
+    const RESET = "\x1b[0m";
+
+    let vaultSentRecvTotal = 0n;
 
     for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
       const batch = batches[batchIdx];
@@ -369,20 +377,33 @@ async function main() {
 
         const before = balancesBefore.get(recipient.user) ?? 0n;
         const after = balancesAfter.get(recipient.user) ?? 0n;
-        const delta = after - before;
+        const balDelta = after - before;
         const contractDf = allDfTokensFromContract.get(recipient.user) ?? 0n;
         const txHash = txHashes.get(recipient.user) ?? "";
+        const sentRecvDelta = recipient.amount - contractDf;
 
-        const deltaMatch = delta === contractDf;
+        vaultSentRecvTotal += sentRecvDelta;
+
+        const deltaMatch = balDelta === contractDf;
         const marker = deltaMatch ? "" : " MISMATCH";
 
-        logger.logMessage(
-          `  ${recipient.user.substring(0, 16)} ${batchNum.toString().padStart(5)} ${recipient.amount.toString().padStart(14)} ${contractDf.toString().padStart(14)} ${before.toString().padStart(14)} ${after.toString().padStart(14)} ${delta.toString().padStart(14)}${marker}`
-        );
+        const sentRecvStr = sentRecvDelta.toString().padStart(14);
+        const absDelta = sentRecvDelta < 0n ? -sentRecvDelta : sentRecvDelta;
+        const sentRecvDisplay = absDelta > DELTA_ALERT_THRESHOLD
+          ? `${YELLOW_BG}${sentRecvStr}${RESET}`
+          : sentRecvStr;
+
+        const line =
+          `  ${recipient.user.substring(0, 16)} ${batchNum.toString().padStart(5)} ${recipient.amount.toString().padStart(14)} ${contractDf.toString().padStart(14)} ${sentRecvDisplay} ${before.toString().padStart(14)} ${after.toString().padStart(14)} ${balDelta.toString().padStart(14)}${marker}`;
+
+        const fileLine =
+          `  ${recipient.user.substring(0, 16)} ${batchNum.toString().padStart(5)} ${recipient.amount.toString().padStart(14)} ${contractDf.toString().padStart(14)} ${sentRecvStr} ${before.toString().padStart(14)} ${after.toString().padStart(14)} ${balDelta.toString().padStart(14)}${marker}${absDelta > DELTA_ALERT_THRESHOLD ? " [HIGH DELTA]" : ""}`;
+
+        logger.logMessage(line, fileLine);
 
         successCount++;
         totalDfReceived += contractDf;
-        totalDelta += delta;
+        totalDelta += balDelta;
         logger.logEntry({
           vault: vaultId,
           user: recipient.user,
@@ -390,7 +411,7 @@ async function main() {
           df_tokens_received: contractDf.toString(),
           df_balance_before: before.toString(),
           df_balance_after: after.toString(),
-          df_balance_delta: delta.toString(),
+          df_balance_delta: balDelta.toString(),
           tx_hash: txHash,
           batch_number: batchNum,
           status: "success",
@@ -398,7 +419,12 @@ async function main() {
       }
     }
 
-    logger.logMessage("  " + "-".repeat(130));
+    logger.logMessage(SEP);
+    const totalStr = vaultSentRecvTotal.toString().padStart(14);
+    const totalLine = `  ${"TOTAL".padEnd(16)} ${"".padStart(5)} ${"".padStart(14)} ${"".padStart(14)} ${YELLOW_BG}${totalStr}${RESET}`;
+    const totalFileLine = `  ${"TOTAL".padEnd(16)} ${"".padStart(5)} ${"".padStart(14)} ${"".padStart(14)} ${totalStr}`;
+    logger.logMessage(totalLine, totalFileLine);
+    logger.logMessage(SEP);
   }
 
   // 3. Summary

@@ -53,9 +53,9 @@ export class Logger {
     this.entryCount++;
   }
 
-  logMessage(msg: string): void {
+  logMessage(msg: string, fileMsg?: string): void {
     console.log(msg);
-    fs.appendFileSync(this.logPath, `[${new Date().toISOString()}] ${msg}\n`);
+    fs.appendFileSync(this.logPath, `[${new Date().toISOString()}] ${fileMsg ?? msg}\n`);
   }
 
   get csvFilePath(): string {
