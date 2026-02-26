@@ -142,7 +142,28 @@ DEFINDEX_API_KEY=                    # Optional: DeFindex API key for demo vault
 MINT_BLEND_TOKENS_URL=               # Optional: Blend faucet URL for demo token minting
 ```
 
-## Deploying the Distributor contract (development)
+## Deploying the Distributor contract
+
+### Deploying from GitHub Release (verified on Stellar Expert)
+
+Deploys the wasm built by the CI release workflow, so [Stellar Expert](https://stellar.expert) can verify and link the source code automatically.
+
+**Prerequisites:** [`gh` CLI](https://cli.github.com) authenticated (`gh auth login`), [`stellar` CLI](https://github.com/stellar/stellar-cli).
+
+```bash
+./scripts/deploy.sh <network> <stellar-identity> [release-tag]
+```
+
+Examples:
+
+```bash
+./scripts/deploy.sh testnet user
+./scripts/deploy.sh testnet user main_defindex-distributor_pkg0.0.0_cli22.8.1
+```
+
+After deploying, update the contract address in `src/addresses.ts` manually.
+
+### Deploying from local build (development)
 
 ```bash
 make test
@@ -192,3 +213,4 @@ output/                    # Script outputs (gitignored)
 | `pnpm demo` | Create testnet vaults with blend strategies, generate test CSV |
 | `pnpm mint <csv>` | Mint testnet tokens (Soroswap faucet + XLM via Friendbot) |
 | `pnpm distribute <csv>` | Distribute dfTokens to users with incremental logging |
+| `./scripts/deploy.sh <network> <identity>` | Deploy contract from GitHub Release (Stellar Expert verified) |
