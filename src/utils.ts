@@ -3,6 +3,7 @@ import { rpc, Address, xdr, Keypair, Contract, Networks, TransactionBuilder, BAS
 import { config } from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
+import { getSecretKey as keychainGet } from "./keychain";
 
 config();
 
@@ -30,6 +31,23 @@ export function getEnvVar(baseName: string): string {
     throw new Error(`Environment variable ${key} is required (STELLAR_NETWORK=${getNetwork()})`);
   }
   return value;
+}
+
+export async function getSecretKey(): Promise<string> {
+  const network = getNetwork();
+  const fromKeychain = await keychainGet(network);
+  if (fromKeychain) return fromKeychain;
+
+  // Fall back to env var (for CI or users who haven't run setup-keys)
+  const envKey = `STELLAR_SECRET_KEY_${network.toUpperCase()}`;
+  const fromEnv = process.env[envKey];
+  if (fromEnv) return fromEnv;
+
+  throw new Error(
+    `No secret key found for ${network}. ` +
+    `Run "pnpm setup-keys" to store it in the OS keychain, ` +
+    `or set ${envKey} in your .env file.`
+  );
 }
 
 export function getNetworkPassphrase(): string {

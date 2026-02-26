@@ -20,16 +20,32 @@ The Distributor enables fund distribution in **campaigns or events** for DeFinde
 - [pnpm](https://pnpm.io/) package manager
 - [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli) (only needed for deploying the smart contract)
 
+## Key Management
+
+Secret keys are stored in the **OS keychain** (macOS Keychain, Linux Secret Service, Windows Credential Manager) — never in plaintext on disk.
+
+```bash
+pnpm setup-keys [testnet|mainnet]   # store key (prompts for secret key, seed phrase, or generates one)
+pnpm setup-keys --show              # print stored public key
+pnpm setup-keys --delete            # remove from keychain
+```
+
+> **Fallback:** if no keychain entry is found, the scripts fall back to `STELLAR_SECRET_KEY_TESTNET` / `STELLAR_SECRET_KEY_MAINNET` in `.env` (useful for CI).
+
 ## Mainnet Usage
 
 ### 1. Setup
 
 ```bash
 pnpm i
-cp .env.example .env
+pnpm setup-keys mainnet
 ```
 
-Edit `.env` with mainnet values:
+For CI or environments without a keychain, copy `.env.example` and set the key there instead:
+
+```bash
+cp .env.example .env
+```
 
 ```env
 STELLAR_NETWORK=mainnet
@@ -73,10 +89,14 @@ To test on testnet, run the demo script that creates test vaults and users.
 
 ```bash
 pnpm i
-cp .env.example .env
+pnpm setup-keys testnet
 ```
 
-`.env` comes configured for testnet by default.
+If you prefer `.env`, copy the example — it comes configured for testnet by default:
+
+```bash
+cp .env.example .env
+```
 
 ### 2. Run the demo
 
@@ -107,11 +127,14 @@ All environment variables are suffixed by network (`_TESTNET` or `_MAINNET`). Th
 ```env
 STELLAR_NETWORK=testnet              # "testnet" or "mainnet"
 
-STELLAR_SECRET_KEY_TESTNET=S...      # Account secret key
+# Secret keys are loaded from the OS keychain (pnpm setup-keys).
+# These env vars are only needed as a fallback (e.g. CI environments).
+STELLAR_SECRET_KEY_TESTNET=          # optional fallback
+STELLAR_SECRET_KEY_MAINNET=          # optional fallback
+
 SOROBAN_RPC_TESTNET=https://soroban-testnet.stellar.org
 HORIZON_RPC_TESTNET=https://horizon-testnet.stellar.org
 
-STELLAR_SECRET_KEY_MAINNET=
 SOROBAN_RPC_MAINNET=
 HORIZON_RPC_MAINNET=
 
@@ -146,6 +169,8 @@ sed -i "s/export const DISTRIBUTOR_TESTNET = \".*\"/export const DISTRIBUTOR_TES
 src/
 ├── utils.ts          # Network config, env helpers, Stellar SDK helpers
 ├── addresses.ts      # Contract addresses and API URLs
+├── keychain.ts       # OS keychain wrapper (macOS/Linux/Windows)
+├── setup-keys.ts     # One-time CLI to store keys in the keychain
 ├── distribute.ts     # Main script: deposit + distribute via contract
 ├── demo.ts           # Testnet demo: create vaults via DeFindex API, generate CSV
 ├── mint.ts           # Mint testnet tokens (Blend faucet, Soroswap, Friendbot)
@@ -163,6 +188,7 @@ output/                    # Script outputs (gitignored)
 
 | Command | Description |
 | --- | --- |
+| `pnpm setup-keys [network]` | Store your Stellar key in the OS keychain (run once) |
 | `pnpm demo` | Create testnet vaults with blend strategies, generate test CSV |
 | `pnpm mint <csv>` | Mint testnet tokens (Soroswap faucet + XLM via Friendbot) |
 | `pnpm distribute <csv>` | Distribute dfTokens to users with incremental logging |

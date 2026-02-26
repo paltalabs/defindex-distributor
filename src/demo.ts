@@ -8,6 +8,7 @@ import {
   getNetworkPassphrase,
   getNetworkConfig,
   getEnvVar,
+  getSecretKey,
   getRpcServer,
   sendTransaction,
   simulateContractCall,
@@ -223,7 +224,7 @@ async function main() {
     process.exit(1);
   }
 
-  const secretKey = getEnvVar("STELLAR_SECRET_KEY");
+  const secretKey = await getSecretKey();
 
   const managerKeypair = Keypair.fromSecret(secretKey);
   const managerPublicKey = managerKeypair.publicKey();

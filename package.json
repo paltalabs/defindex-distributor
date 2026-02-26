@@ -5,11 +5,13 @@
   "author": "coderipper",
   "license": "MIT",
   "scripts": {
+    "setup-keys": "tsx src/setup-keys.ts",
     "demo": "tsx src/demo.ts",
     "distribute": "tsx src/distribute.ts",
     "mint": "tsx src/mint.ts"
   },
   "dependencies": {
+    "@napi-rs/keyring": "^1.2.0",
     "@stellar/stellar-sdk": "^14.4.3",
     "bip39": "^3.1.0",
     "dotenv": "^16.6.1",
