@@ -6,7 +6,6 @@ import * as path from "path";
 import {
   getNetwork,
   getNetworkPassphrase,
-  getEnvVar,
   getSecretKey,
   getRpcServer,
   sendTransaction,
@@ -19,13 +18,13 @@ import { DISTRIBUTOR_MAINNET, DISTRIBUTOR_TESTNET } from "./addresses";
 
 config();
 
-const DELTA_ALERT_THRESHOLD = BigInt(10000);
+// ── Constants ──
 
-function getDistributorAddress(): string {
-  return getNetwork() === "mainnet" ? DISTRIBUTOR_MAINNET : DISTRIBUTOR_TESTNET;
-}
+const TOKEN_DECIMALS = 7;
+const TOKEN_DIVISOR = 10n ** BigInt(TOKEN_DECIMALS);
 
 // ── Types ──
+
 interface CsvRecord {
   vault: string;
   asset: string;
@@ -38,8 +37,47 @@ interface VaultGroup {
   recipients: { user: string; amount: bigint }[];
 }
 
+/** Accumulated results from sending all batches for a single vault */
+interface BatchResults {
+  dfTokensFromContract: Map<string, bigint>;
+  underlyingReceived: Map<string, bigint>;
+  txHashes: Map<string, string>;
+  failedUsers: Set<string>;
+  failedCount: number;
+}
+
+/** Conversion rate reference for dfToken → underlying */
+interface ConversionRate {
+  referenceDfTokens: bigint;
+  referenceUnderlying: bigint;
+}
+
+/** Accumulated counters across all vaults */
+interface VaultCounters {
+  successCount: number;
+  failedCount: number;
+  totalUnderlyingSent: bigint;
+  totalUnderlyingReceived: bigint;
+}
+
+// ── Formatting Helpers ──
+
+/** Converts a raw stroops amount (bigint) to a human-readable string with 7 decimals */
+function formatTokenAmount(stroops: bigint): string {
+  const whole = stroops / TOKEN_DIVISOR;
+  const frac = (stroops < 0n ? -stroops : stroops) % TOKEN_DIVISOR;
+  return `${whole}.${frac.toString().padStart(TOKEN_DECIMALS, "0")}`;
+}
+
+// ── Config ──
+
+function getDistributorAddress(): string {
+  return getNetwork() === "mainnet" ? DISTRIBUTOR_MAINNET : DISTRIBUTOR_TESTNET;
+}
+
 // ── CSV Parsing ──
-// Accepts demo CSV format: vault, asset, user, amount
+
+/** Parses a CSV file with columns: vault, asset, user, amount */
 function parseCSV(filePath: string): CsvRecord[] {
   const absolutePath = path.resolve(filePath);
   if (!fs.existsSync(absolutePath)) {
@@ -91,6 +129,7 @@ function parseCSV(filePath: string): CsvRecord[] {
   return records;
 }
 
+/** Groups CSV records by vault address */
 function groupByVault(records: CsvRecord[]): Map<string, VaultGroup> {
   const groups = new Map<string, VaultGroup>();
 
@@ -106,37 +145,52 @@ function groupByVault(records: CsvRecord[]): Map<string, VaultGroup> {
   return groups;
 }
 
-// ── Balance Fetching ──
-async function getDfTokenBalance(vaultId: string, userAddress: string, callerPublicKey: string): Promise<bigint> {
+// ── Asset & Conversion Helpers ──
+
+/** Fetches the symbol of a Stellar token contract. Falls back to truncated address. */
+async function fetchAssetSymbol(assetAddress: string, callerPublicKey: string): Promise<string> {
   try {
-    const result = await simulateContractCall(
-      vaultId,
-      "balance",
-      [new Address(userAddress).toScVal()],
-      callerPublicKey
-    );
-    return BigInt(result as string | number);
+    const result = await simulateContractCall(assetAddress, "symbol", [], callerPublicKey);
+    return String(result);
   } catch {
-    return 0n;
+    return assetAddress.substring(0, 8) + "...";
   }
 }
 
-async function fetchBalances(
+/** Calls `get_asset_amounts_per_shares` on a vault to convert dfTokens → underlying (first asset). */
+async function getAssetAmountsPerShares(
   vaultId: string,
-  users: string[],
-  callerPublicKey: string
-): Promise<Map<string, bigint>> {
-  const balances = new Map<string, bigint>();
+  dfTokenAmount: bigint,
+  callerPublicKey: string,
+): Promise<bigint> {
+  const result = await simulateContractCall(
+    vaultId,
+    "get_asset_amounts_per_shares",
+    [nativeToScVal(dfTokenAmount, { type: "i128" })],
+    callerPublicKey,
+  );
+  const amounts = result as bigint[];
+  return BigInt(amounts[0]);
+}
 
-  for (const user of users) {
-    const balance = await getDfTokenBalance(vaultId, user, callerPublicKey);
-    balances.set(user, balance);
-  }
+/** Queries the vault for a reference conversion rate using 10 full tokens of dfToken. */
+async function fetchConversionRate(
+  vaultId: string,
+  callerPublicKey: string,
+): Promise<ConversionRate> {
+  const referenceDfTokens = 10n * TOKEN_DIVISOR;
+  const referenceUnderlying = await getAssetAmountsPerShares(vaultId, referenceDfTokens, callerPublicKey);
+  return { referenceDfTokens, referenceUnderlying };
+}
 
-  return balances;
+/** Converts a dfToken amount to underlying using a pre-fetched conversion rate. */
+function dfTokensToUnderlying(dfTokens: bigint, rate: ConversionRate): bigint {
+  return (dfTokens * rate.referenceUnderlying) / rate.referenceDfTokens;
 }
 
 // ── Transaction Building ──
+
+/** Builds the Soroban "distribute" operation for a batch of recipients */
 function buildDistributeOperation(
   callerAddress: string,
   assetAddress: string,
@@ -145,7 +199,6 @@ function buildDistributeOperation(
 ): StellarSdk.xdr.Operation {
   const distributorContract = new Contract(getDistributorAddress());
 
-  // Build Vec<Recipient> where Recipient is a struct { address: Address, amount: i128 }
   const recipientsScVal = xdr.ScVal.scvVec(
     recipients.map((r) =>
       xdr.ScVal.scvMap([
@@ -170,6 +223,7 @@ function buildDistributeOperation(
   );
 }
 
+/** Builds, simulates, signs and submits a transaction. Returns the tx hash */
 async function buildAndSendTx(
   sourceKeypair: Keypair,
   operation: StellarSdk.xdr.Operation
@@ -205,6 +259,8 @@ async function buildAndSendTx(
 }
 
 // ── Result Parsing ──
+
+/** Parses the contract return value into a map of user → dfTokens minted */
 function parseContractResult(returnValue: xdr.ScVal): Map<string, bigint> {
   const result = new Map<string, bigint>();
   const tuples = StellarSdk.scValToNative(returnValue) as Array<[string, bigint]>;
@@ -216,7 +272,188 @@ function parseContractResult(returnValue: xdr.ScVal): Map<string, bigint> {
   return result;
 }
 
+// ── Batch Processing ──
+
+/** Sends all batches for a vault and collects contract results.
+ *  Logs failed recipients to the CSV logger. */
+async function sendVaultBatches(
+  batches: { user: string; amount: bigint }[][],
+  vaultId: string,
+  group: VaultGroup,
+  sourceKeypair: Keypair,
+  assetSymbol: string,
+  logger: Logger,
+): Promise<BatchResults> {
+  const sourcePublicKey = sourceKeypair.publicKey();
+  const dfTokensFromContract = new Map<string, bigint>();
+  const underlyingReceivedMap = new Map<string, bigint>();
+  const txHashes = new Map<string, string>();
+  const failedUsers = new Set<string>();
+  let failedCount = 0;
+
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+    const batchNum = batchIdx + 1;
+    const batchTotal = batch.reduce((sum, r) => sum + r.amount, 0n);
+
+    logger.logMessage(`  Batch ${batchNum}/${batches.length} (${batch.length} recipients, total: ${batchTotal})`);
+    logger.logMessage("  Building distribute transaction...");
+
+    const operation = buildDistributeOperation(sourcePublicKey, group.asset, vaultId, batch);
+
+    try {
+      const txHash = await buildAndSendTx(sourceKeypair, operation);
+      logger.logMessage(`  TX confirmed: ${txHash}`);
+
+      const txResult = await getRpcServer().getTransaction(txHash);
+      if (txResult.status === "SUCCESS" && txResult.returnValue) {
+        const batchDfTokens = parseContractResult(txResult.returnValue);
+
+        // Fetch conversion rate right after this batch
+        const rate = await fetchConversionRate(vaultId, sourcePublicKey);
+        logger.logMessage(`  Batch ${batchNum} rate: 10 dfTokens = ${formatTokenAmount(rate.referenceUnderlying)} ${assetSymbol}`);
+
+        logger.logMessage(`  Contract returned dfTokens for batch ${batchNum}:`);
+        for (const [user, tokens] of batchDfTokens) {
+          const underlying = dfTokensToUnderlying(tokens, rate);
+          logger.logMessage(`    ${user.substring(0, 12)}... → ${tokens} dfTokens (≈ ${formatTokenAmount(underlying)} ${assetSymbol})`);
+          dfTokensFromContract.set(user, tokens);
+          underlyingReceivedMap.set(user, underlying);
+          txHashes.set(user, txHash);
+        }
+      } else {
+        logger.logMessage(`  WARNING: TX status=${txResult.status}, no return value`);
+        for (const r of batch) {
+          txHashes.set(r.user, txHash);
+        }
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logger.logMessage(`  Batch ${batchNum} FAILED: ${errorMsg}`);
+
+      for (const recipient of batch) {
+        failedUsers.add(recipient.user);
+        failedCount++;
+        logger.logEntry({
+          vault: vaultId,
+          user: recipient.user,
+          asset_symbol: assetSymbol,
+          amount_sent: recipient.amount.toString(),
+          df_tokens_received: "0",
+          underlying_received: "0",
+          tx_hash: "",
+          batch_number: batchNum,
+          status: `failed: ${errorMsg}`,
+        });
+      }
+    }
+  }
+
+  return { dfTokensFromContract, underlyingReceived: underlyingReceivedMap, txHashes, failedUsers, failedCount };
+}
+
+// ── Results Table ──
+
+/** Prints the results comparison table and logs each successful recipient to CSV */
+function logResultsTable(
+  batches: { user: string; amount: bigint }[][],
+  vaultId: string,
+  failedUsers: Set<string>,
+  dfTokensFromContract: Map<string, bigint>,
+  underlyingReceivedMap: Map<string, bigint>,
+  txHashes: Map<string, string>,
+  assetSymbol: string,
+  logger: Logger,
+): { successCount: number; totalUnderlyingSent: bigint; totalUnderlyingReceived: bigint } {
+  const sym = assetSymbol;
+  const header =
+    `  ${"User".padEnd(16)} ${"Batch".padStart(5)} ` +
+    `${(sym + " Sent(strps)").padStart(20)} ` +
+    `${"dfTokens Recv(strps)".padStart(22)} ` +
+    `${(sym + " Recv(calc)").padStart(18)} ` +
+    `${"Sent/Recv Δ".padStart(18)}`;
+  const SEP = "  " + "-".repeat(header.length);
+
+  logger.logMessage("");
+  logger.logMessage("  Results:");
+  logger.logMessage(SEP);
+  logger.logMessage(header);
+  logger.logMessage(SEP);
+
+  let successCount = 0;
+  let totalUnderlyingSent = 0n;
+  let totalUnderlyingReceived = 0n;
+
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+    const batchNum = batchIdx + 1;
+
+    for (const recipient of batch) {
+      if (failedUsers.has(recipient.user)) continue;
+
+      const contractDf = dfTokensFromContract.get(recipient.user) ?? 0n;
+      const txHash = txHashes.get(recipient.user) ?? "";
+      const underlyingReceived = underlyingReceivedMap.get(recipient.user) ?? 0n;
+      const delta = underlyingReceived - recipient.amount;
+
+      logger.logMessage(
+        `  ${recipient.user.substring(0, 16)} ` +
+        `${batchNum.toString().padStart(5)} ` +
+        `${recipient.amount.toString().padStart(20)} ` +
+        `${contractDf.toString().padStart(22)} ` +
+        `${formatTokenAmount(underlyingReceived).padStart(18)} ` +
+        `${formatTokenAmount(delta).padStart(18)}`
+      );
+
+      successCount++;
+      totalUnderlyingSent += recipient.amount;
+      totalUnderlyingReceived += underlyingReceived;
+      logger.logEntry({
+        vault: vaultId,
+        user: recipient.user,
+        asset_symbol: assetSymbol,
+        amount_sent: recipient.amount.toString(),
+        df_tokens_received: contractDf.toString(),
+        underlying_received: underlyingReceived.toString(),
+        tx_hash: txHash,
+        batch_number: batchNum,
+        status: "success",
+      });
+    }
+  }
+
+  logger.logMessage(SEP);
+
+  return { successCount, totalUnderlyingSent, totalUnderlyingReceived };
+}
+
+// ── Summary ──
+
+/** Prints final summary with totals and log file paths */
+function logSummary(
+  logger: Logger,
+  vaultCount: number,
+  counters: VaultCounters,
+  assetSymbol: string,
+): void {
+  const totalEntries = counters.successCount + counters.failedCount;
+  const diff = counters.totalUnderlyingReceived - counters.totalUnderlyingSent;
+  logger.logMessage("");
+  logger.logMessage("=".repeat(60));
+  logger.logMessage("Summary");
+  logger.logMessage("=".repeat(60));
+  logger.logMessage(`Vaults processed: ${vaultCount}`);
+  logger.logMessage(`Recipients: ${totalEntries} (${counters.successCount} ok, ${counters.failedCount} failed)`);
+  logger.logMessage(`Total underlying sent:     ${formatTokenAmount(counters.totalUnderlyingSent)} ${assetSymbol}`);
+  logger.logMessage(`Total underlying received: ${formatTokenAmount(counters.totalUnderlyingReceived)} ${assetSymbol}`);
+  logger.logMessage(`Difference:                ${formatTokenAmount(diff)} ${assetSymbol}`);
+  logger.logMessage("=".repeat(60));
+  logger.logMessage(`CSV log: ${logger.csvFilePath}`);
+  logger.logMessage(`Full log: ${logger.logFilePath}`);
+}
+
 // ── Main ──
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -230,10 +467,10 @@ async function main() {
 
   const csvPath = args[0];
   const secretKey = await getSecretKey();
-
   const sourceKeypair = Keypair.fromSecret(secretKey);
   const sourcePublicKey = sourceKeypair.publicKey();
 
+  // Print banner
   console.log("=".repeat(60));
   console.log("DeFindex Distributor (deposit + distribute)");
   console.log("=".repeat(60));
@@ -243,7 +480,7 @@ async function main() {
   console.log(`Input CSV:   ${csvPath}`);
   console.log("");
 
-  // 1. Parse CSV and group by vault
+  // Parse CSV and group records by vault
   const records = parseCSV(csvPath);
   const vaultGroups = groupByVault(records);
 
@@ -262,15 +499,18 @@ async function main() {
   logger.logMessage(`Caller: ${sourcePublicKey}`);
   logger.logMessage(`Distributor: ${getDistributorAddress()}`);
 
-  let successCount = 0;
-  let failedCount = 0;
-  let totalDfReceived = 0n;
-  let totalDelta = 0n;
+  const counters: VaultCounters = {
+    successCount: 0,
+    failedCount: 0,
+    totalUnderlyingSent: 0n,
+    totalUnderlyingReceived: 0n,
+  };
 
-  // 2. Process each vault
+  let lastAssetSymbol = "";
+
+  // Process each vault: send batches → fetch conversion rate → compare results
   for (const [vaultId, group] of vaultGroups) {
     const totalAmount = group.recipients.reduce((sum, r) => sum + r.amount, 0n);
-    const users = group.recipients.map((r) => r.user);
     const batches = batchArray(group.recipients, BATCH_MAX_SIZE);
 
     logger.logMessage("-".repeat(60));
@@ -279,170 +519,29 @@ async function main() {
     logger.logMessage(`Recipients: ${group.recipients.length} | Total amount: ${totalAmount}`);
     logger.logMessage(`Batches: ${batches.length} (max batch size: ${BATCH_MAX_SIZE})`);
 
-    // 2a. Pre-fetch dfToken balances (once for all users of this vault)
-    logger.logMessage("  Fetching dfToken balances before...");
-    const balancesBefore = await fetchBalances(vaultId, users, sourcePublicKey);
-    for (const [user, bal] of balancesBefore) {
-      logger.logMessage(`    ${user.substring(0, 12)}... balance: ${bal}`);
-    }
+    // Fetch asset symbol
+    const assetSymbol = await fetchAssetSymbol(group.asset, sourcePublicKey);
+    lastAssetSymbol = assetSymbol;
+    logger.logMessage(`  Asset symbol: ${assetSymbol}`);
 
-    // 2b. Process each batch
-    const allDfTokensFromContract = new Map<string, bigint>();
-    const txHashes = new Map<string, string>();
-    const failedUsers = new Set<string>();
+    // Send all batches for this vault (conversion rate fetched per batch inside)
+    const batchResults = await sendVaultBatches(batches, vaultId, group, sourceKeypair, assetSymbol, logger);
+    counters.failedCount += batchResults.failedCount;
 
-    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-      const batch = batches[batchIdx];
-      const batchNum = batchIdx + 1;
-      const batchTotal = batch.reduce((sum, r) => sum + r.amount, 0n);
-
-      logger.logMessage(`  Batch ${batchNum}/${batches.length} (${batch.length} recipients, total: ${batchTotal})`);
-      logger.logMessage("  Building distribute transaction...");
-
-      const operation = buildDistributeOperation(
-        sourcePublicKey,
-        group.asset,
-        vaultId,
-        batch
-      );
-
-      try {
-        const txHash = await buildAndSendTx(sourceKeypair, operation);
-        logger.logMessage(`  TX confirmed: ${txHash}`);
-
-        const txResult = await getRpcServer().getTransaction(txHash);
-        if (txResult.status === "SUCCESS" && txResult.returnValue) {
-          const batchDfTokens = parseContractResult(txResult.returnValue);
-          logger.logMessage(`  Contract returned dfTokens for batch ${batchNum}:`);
-          for (const [user, tokens] of batchDfTokens) {
-            logger.logMessage(`    ${user.substring(0, 12)}... → ${tokens}`);
-            allDfTokensFromContract.set(user, tokens);
-            txHashes.set(user, txHash);
-          }
-        } else {
-          logger.logMessage(`  WARNING: TX status=${txResult.status}, no return value`);
-          for (const r of batch) {
-            txHashes.set(r.user, txHash);
-          }
-        }
-      } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        logger.logMessage(`  Batch ${batchNum} FAILED: ${errorMsg}`);
-
-        for (const recipient of batch) {
-          const before = balancesBefore.get(recipient.user) ?? 0n;
-          failedUsers.add(recipient.user);
-          failedCount++;
-          logger.logEntry({
-            vault: vaultId,
-            user: recipient.user,
-            amount_sent: recipient.amount.toString(),
-            df_tokens_received: "0",
-            df_balance_before: before.toString(),
-            df_balance_after: before.toString(),
-            df_balance_delta: "0",
-            tx_hash: "",
-            batch_number: batchNum,
-            status: `failed: ${errorMsg}`,
-          });
-        }
-      }
-    }
-
-    // 2c. Post-fetch dfToken balances (once for all users of this vault)
-    logger.logMessage("  Fetching dfToken balances after...");
-    const balancesAfter = await fetchBalances(vaultId, users, sourcePublicKey);
-
-    // 2d. Build log entries and display comparison table
-    logger.logMessage("");
-    logger.logMessage("  Results:");
-    const SEP = "  " + "-".repeat(148);
-    logger.logMessage(SEP);
-    logger.logMessage(
-      `  ${"User".padEnd(16)} ${"Batch".padStart(5)} ${"Amt Sent".padStart(14)} ${"dfTok Recv".padStart(14)} ${"Sent/Recv Δ".padStart(14)} ${"Bal Before".padStart(14)} ${"Bal After".padStart(14)} ${"Bal Δ".padStart(14)}`
+    // Print results comparison table and log successful entries
+    const tableResults = logResultsTable(
+      batches, vaultId, batchResults.failedUsers,
+      batchResults.dfTokensFromContract, batchResults.underlyingReceived,
+      batchResults.txHashes, assetSymbol,
+      logger,
     );
-    logger.logMessage(SEP);
-
-    const YELLOW_BG = "\x1b[43;30m";
-    const RESET = "\x1b[0m";
-
-    let vaultSentRecvTotal = 0n;
-
-    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-      const batch = batches[batchIdx];
-      const batchNum = batchIdx + 1;
-
-      for (const recipient of batch) {
-        if (failedUsers.has(recipient.user)) continue;
-
-        const before = balancesBefore.get(recipient.user) ?? 0n;
-        const after = balancesAfter.get(recipient.user) ?? 0n;
-        const balDelta = after - before;
-        const contractDf = allDfTokensFromContract.get(recipient.user) ?? 0n;
-        const txHash = txHashes.get(recipient.user) ?? "";
-        const sentRecvDelta = recipient.amount - contractDf;
-
-        vaultSentRecvTotal += sentRecvDelta;
-
-        const deltaMatch = balDelta === contractDf;
-        const marker = deltaMatch ? "" : " MISMATCH";
-
-        const sentRecvStr = sentRecvDelta.toString().padStart(14);
-        const absDelta = sentRecvDelta < 0n ? -sentRecvDelta : sentRecvDelta;
-        const sentRecvDisplay = absDelta > DELTA_ALERT_THRESHOLD
-          ? `${YELLOW_BG}${sentRecvStr}${RESET}`
-          : sentRecvStr;
-
-        const line =
-          `  ${recipient.user.substring(0, 16)} ${batchNum.toString().padStart(5)} ${recipient.amount.toString().padStart(14)} ${contractDf.toString().padStart(14)} ${sentRecvDisplay} ${before.toString().padStart(14)} ${after.toString().padStart(14)} ${balDelta.toString().padStart(14)}${marker}`;
-
-        const fileLine =
-          `  ${recipient.user.substring(0, 16)} ${batchNum.toString().padStart(5)} ${recipient.amount.toString().padStart(14)} ${contractDf.toString().padStart(14)} ${sentRecvStr} ${before.toString().padStart(14)} ${after.toString().padStart(14)} ${balDelta.toString().padStart(14)}${marker}${absDelta > DELTA_ALERT_THRESHOLD ? " [HIGH DELTA]" : ""}`;
-
-        logger.logMessage(line, fileLine);
-
-        successCount++;
-        totalDfReceived += contractDf;
-        totalDelta += balDelta;
-        logger.logEntry({
-          vault: vaultId,
-          user: recipient.user,
-          amount_sent: recipient.amount.toString(),
-          df_tokens_received: contractDf.toString(),
-          df_balance_before: before.toString(),
-          df_balance_after: after.toString(),
-          df_balance_delta: balDelta.toString(),
-          tx_hash: txHash,
-          batch_number: batchNum,
-          status: "success",
-        });
-      }
-    }
-
-    logger.logMessage(SEP);
-    const totalStr = vaultSentRecvTotal.toString().padStart(14);
-    const totalLine = `  ${"TOTAL".padEnd(16)} ${"".padStart(5)} ${"".padStart(14)} ${"".padStart(14)} ${YELLOW_BG}${totalStr}${RESET}`;
-    const totalFileLine = `  ${"TOTAL".padEnd(16)} ${"".padStart(5)} ${"".padStart(14)} ${"".padStart(14)} ${totalStr}`;
-    logger.logMessage(totalLine, totalFileLine);
-    logger.logMessage(SEP);
+    counters.successCount += tableResults.successCount;
+    counters.totalUnderlyingSent += tableResults.totalUnderlyingSent;
+    counters.totalUnderlyingReceived += tableResults.totalUnderlyingReceived;
   }
 
-  // 3. Summary
-  const totalEntries = successCount + failedCount;
-  logger.logMessage("");
-  logger.logMessage("=".repeat(60));
-  logger.logMessage("Summary");
-  logger.logMessage("=".repeat(60));
-  logger.logMessage(`Vaults processed: ${vaultGroups.size}`);
-  logger.logMessage(`Recipients: ${totalEntries} (${successCount} ok, ${failedCount} failed)`);
-  logger.logMessage(`Total dfTokens received (contract): ${totalDfReceived}`);
-  logger.logMessage(`Total dfTokens delta (balance):     ${totalDelta}`);
-  if (totalDfReceived !== totalDelta) {
-    logger.logMessage(`Discrepancy: ${totalDelta - totalDfReceived}`);
-  }
-  logger.logMessage("=".repeat(60));
-  logger.logMessage(`CSV log: ${logger.csvFilePath}`);
-  logger.logMessage(`Full log: ${logger.logFilePath}`);
+  // Print final summary
+  logSummary(logger, vaultGroups.size, counters, lastAssetSymbol);
 }
 
 main().catch((error) => {

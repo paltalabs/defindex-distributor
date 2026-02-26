@@ -4,18 +4,17 @@ import { getOutputPath } from "./utils";
 export interface TransferLogEntry {
   vault: string;
   user: string;
+  asset_symbol: string;
   amount_sent: string;
   df_tokens_received: string;
-  df_balance_before: string;
-  df_balance_after: string;
-  df_balance_delta: string;
+  underlying_received: string;
   tx_hash: string;
   batch_number: number;
   status: string;
 }
 
 const CSV_HEADER =
-  "vault,user,amount_sent,df_tokens_received,df_balance_before,df_balance_after,df_balance_delta,tx_hash,batch_number,status";
+  "vault,user,asset_symbol,amount_sent,df_tokens_received,underlying_received,tx_hash,batch_number,status";
 
 export class Logger {
   private csvPath: string;
@@ -35,11 +34,10 @@ export class Logger {
     const csvLine = [
       entry.vault,
       entry.user,
+      entry.asset_symbol,
       entry.amount_sent,
       entry.df_tokens_received,
-      entry.df_balance_before,
-      entry.df_balance_after,
-      entry.df_balance_delta,
+      entry.underlying_received,
       entry.tx_hash,
       entry.batch_number,
       `"${entry.status}"`,
@@ -47,7 +45,7 @@ export class Logger {
 
     fs.appendFileSync(this.csvPath, csvLine + "\n");
 
-    const readable = `[${entry.status.toUpperCase()}] ${entry.user.substring(0, 12)}... | sent=${entry.amount_sent} dfTok=${entry.df_tokens_received} delta=${entry.df_balance_delta} tx=${entry.tx_hash || "N/A"} batch=${entry.batch_number}`;
+    const readable = `[${entry.status.toUpperCase()}] ${entry.user.substring(0, 12)}... | sent=${entry.amount_sent} dfTok=${entry.df_tokens_received} underlying=${entry.underlying_received} tx=${entry.tx_hash || "N/A"} batch=${entry.batch_number}`;
     fs.appendFileSync(this.logPath, readable + "\n");
 
     this.entryCount++;
