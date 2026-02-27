@@ -226,7 +226,8 @@ function buildDistributeOperation(
 /** Builds, simulates, signs and submits a transaction. Returns the tx hash */
 async function buildAndSendTx(
   sourceKeypair: Keypair,
-  operation: StellarSdk.xdr.Operation
+  operation: StellarSdk.xdr.Operation,
+  xdrMode: boolean = false
 ): Promise<string> {
   const sourcePublicKey = sourceKeypair.publicKey();
   const account = await getRpcServer().getAccount(sourcePublicKey);
@@ -253,7 +254,21 @@ async function buildAndSendTx(
   }
 
   const preparedTx = rpc.assembleTransaction(tx, successSim).build();
+
+  if (xdrMode) {
+    const unsignedXdr = preparedTx.toEnvelope().toXDR("base64");
+    console.log("\n--- Unsigned XDR ---");
+    console.log(unsignedXdr);
+  }
+
   preparedTx.sign(sourceKeypair);
+
+  if (xdrMode) {
+    const signedXdr = preparedTx.toEnvelope().toXDR("base64");
+    console.log("\n--- Signed XDR ---");
+    console.log(signedXdr);
+    console.log("");
+  }
 
   return sendTransaction(preparedTx);
 }
@@ -283,6 +298,7 @@ async function sendVaultBatches(
   sourceKeypair: Keypair,
   assetSymbol: string,
   logger: Logger,
+  xdrMode: boolean = false,
 ): Promise<BatchResults> {
   const sourcePublicKey = sourceKeypair.publicKey();
   const dfTokensFromContract = new Map<string, bigint>();
@@ -302,7 +318,7 @@ async function sendVaultBatches(
     const operation = buildDistributeOperation(sourcePublicKey, group.asset, vaultId, batch);
 
     try {
-      const txHash = await buildAndSendTx(sourceKeypair, operation);
+      const txHash = await buildAndSendTx(sourceKeypair, operation, xdrMode);
       logger.logMessage(`  TX confirmed: ${txHash}`);
 
       const txResult = await getRpcServer().getTransaction(txHash);
@@ -458,14 +474,16 @@ async function main() {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
-    console.error("Usage: pnpm use-distributor <demo.csv>");
+    console.error("Usage: pnpm use-distributor <demo.csv> [--xdr]");
     console.error("");
     console.error("CSV columns: vault,asset,user,amount");
     console.error("Calls the Distributor contract to deposit + distribute in one tx per vault.");
+    console.error("  --xdr  Print unsigned and signed XDR for each transaction (debugging)");
     process.exit(1);
   }
 
-  const csvPath = args[0];
+  const xdrMode = args.includes("--xdr");
+  const csvPath = args.find((a) => !a.startsWith("--"))!;
   const secretKey = await getSecretKey();
   const sourceKeypair = Keypair.fromSecret(secretKey);
   const sourcePublicKey = sourceKeypair.publicKey();
@@ -525,7 +543,7 @@ async function main() {
     logger.logMessage(`  Asset symbol: ${assetSymbol}`);
 
     // Send all batches for this vault (conversion rate fetched per batch inside)
-    const batchResults = await sendVaultBatches(batches, vaultId, group, sourceKeypair, assetSymbol, logger);
+    const batchResults = await sendVaultBatches(batches, vaultId, group, sourceKeypair, assetSymbol, logger, xdrMode);
     counters.failedCount += batchResults.failedCount;
 
     // Print results comparison table and log successful entries

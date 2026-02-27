@@ -72,8 +72,10 @@ CCZGLAUBDKJSQK72QOZHVU7CUWKW45OZWYWCLL27AEK74U2OIBK6LXF2,CDHZFQZWSU7GSHUBWFEL2FJ
 ### 3. Run the distribution
 
 ```bash
-pnpm distribute path/to/file.csv
+STELLAR_NETWORK=mainnet pnpm distribute path/to/file.csv
 ```
+
+Add `--xdr` to print the unsigned and signed XDR of each transaction (useful for debugging).
 
 The script will:
 
@@ -120,6 +122,8 @@ This will:
 pnpm distribute output/demo/demo_testnet_<timestamp>.csv
 ```
 
+Add `--xdr` to print the unsigned and signed XDR of each transaction (useful for debugging).
+
 ## Environment Variables
 
 All environment variables are suffixed by network (`_TESTNET` or `_MAINNET`). The `STELLAR_NETWORK` variable determines which suffix is used.
@@ -158,7 +162,7 @@ Examples:
 
 ```bash
 ./scripts/deploy.sh testnet user
-./scripts/deploy.sh testnet user main_defindex-distributor_pkg0.0.0_cli22.8.1
+./scripts/deploy.sh testnet user main_defindex-distributor_pkg0.0.1_cli22.8.1
 ```
 
 After deploying, update the contract address in `src/addresses.ts` manually.
