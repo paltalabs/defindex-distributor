@@ -75,9 +75,6 @@ impl Distributor {
             if r.amount <= 0 {
                 panic!("each recipient amount must be positive");
             }
-            if r.address == vault {
-                panic!("recipient address must not be the vault");
-            }
             if seen.contains_key(r.address.clone()) {
                 panic!("duplicate recipient address");
             }
