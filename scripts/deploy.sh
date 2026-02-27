@@ -69,10 +69,22 @@ echo "Downloaded: $(basename "$WASM_FILE")"
 
 # ── Deploy contract ──
 echo "Deploying to $NETWORK..."
-CONTRACT_ID=$(stellar contract deploy \
-  --wasm "$WASM_FILE" \
-  --source-account "$IDENTITY" \
-  --network "$NETWORK")
+MAX_ATTEMPTS=3
+CONTRACT_ID=""
+for attempt in $(seq 1 $MAX_ATTEMPTS); do
+  CONTRACT_ID=$(stellar contract deploy \
+    --wasm "$WASM_FILE" \
+    --source-account "$IDENTITY" \
+    --network "$NETWORK") && break
+  echo "Attempt $attempt/$MAX_ATTEMPTS failed."
+  if [[ $attempt -lt $MAX_ATTEMPTS ]]; then
+    echo "Retrying in 5s..."
+    sleep 5
+  else
+    echo "❌ All $MAX_ATTEMPTS attempts failed. Exiting."
+    exit 1
+  fi
+done
 
 echo ""
 echo "=== Deploy successful ==="
